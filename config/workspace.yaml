@@ -1,12 +1,12 @@
 # 구성 초안. 값은 설계 후보이고 실측이 아니다.
 # verified_g0a 가 false 인 동안 실장치 실행은 G0a 세션만 허용된다.
-config_version: "3"
-verified_g0a: true
+config_version: "4"
+verified_g0a: false
 
 table:
   # 블록을 작업대에 바로 놓는 구성. 모델 값이다.
-  # G0b-0 관찰: 22.5 mm에서 블록 상단 1/3을 잡고 들림·10초 유지, 작업대 접촉 없음(한 위치 한 번).
-  z_grasp_mm: 22.5
+  # 22.5 mm는 hover 유지가 됐으나 park 운반에서 낙하(G0b-1). 운반 시험 후보다.
+  z_grasp_mm: 20.0
   tilt_deg: 5.0
   tilt_tol_deg: 5.0
   z_tol_mm: 1.0

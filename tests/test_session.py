@@ -15,6 +15,7 @@ from learned_grasp.session import (
     descend_and_stop,
     fit_config,
     run_fit,
+    run_carry_test,
     run_grip_test,
     make_block_loader,
     make_pick_observer,
@@ -225,6 +226,80 @@ def test_grip_test_closes_lifts_and_opens_low(ready_config):
     assert len(fake.writes) == 9 and arm.pose.kind == "park"
     opened_at = next(i for i, (_, g, _) in enumerate(fake.writes) if i > 2 and g == config.open_sdk)
     assert fake.writes[opened_at][0] == fake.writes[opened_at - 1][0] != config.park
+
+
+def _carry(ready_config, tmp_path, sleep=None):
+    table = generate(ready_config.table)
+    fake = FakeArm()
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=sleep or (lambda _: None))
+    ledger = AttemptLedger(tmp_path / "carry.jsonl")
+
+    def load(trial):
+        arm.goto(Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"]))
+
+    return fake, arm, ledger, table, load
+
+
+def test_carry_test_goes_to_park_closed_and_opens_at_grasp(ready_config, tmp_path):
+    seen = []
+    holder = {}
+
+    def sleep(seconds):
+        seen.append((len(holder["fake"].writes), seconds))
+
+    fake, arm, ledger, table, load = _carry(ready_config, tmp_path, sleep)
+    holder["fake"] = fake
+    run_carry_test(arm, ledger, ready_config, table, load, 123.0, 1)
+    assert len(fake.writes) == 11 and arm.pose.kind == "park"
+    q = [write[0] for write in fake.writes]
+    grips = [write[1] for write in fake.writes]
+    assert q[0] == q[5] == q[10] == ready_config.park
+    assert q[1] == q[4] == q[6] == q[9] and q[2] == q[3] == q[7] == q[8]
+    assert grips[:3] == [ready_config.open_sdk] * 3
+    assert grips[3:8] == [ready_config.close_sdk] * 5
+    assert grips[8:] == [ready_config.open_sdk] * 3
+    assert [entry for entry in seen if entry[1] == 123.0] == [(6, 123.0)]
+    finished, open_ids = ledger.state()
+    record = finished[f"carry-{ready_config.config_version}-1"]
+    assert not open_ids and record["outcome"] == "ok"
+    assert ledger.records()[0]["table_sha256"] == table.sha256()
+
+
+@pytest.mark.parametrize("attempt", [0, 4])
+def test_carry_test_rejects_attempt_out_of_range(ready_config, tmp_path, attempt):
+    fake, arm, ledger, table, load = _carry(ready_config, tmp_path)
+    with pytest.raises(SafetyViolation):
+        run_carry_test(arm, ledger, ready_config, table, load, 0.0, attempt)
+    assert fake.writes == []
+
+
+def test_carry_test_rejects_repeated_attempt(ready_config, tmp_path):
+    fake, arm, ledger, table, load = _carry(ready_config, tmp_path)
+    run_carry_test(arm, ledger, ready_config, table, load, 0.0, 1)
+    fake2, arm2, _, _, load2 = _carry(ready_config, tmp_path)
+    with pytest.raises(SafetyViolation, match="이미 수행"):
+        run_carry_test(arm2, ledger, ready_config, table, load2, 0.0, 1)
+    assert fake2.writes == []
+
+
+def test_carry_test_stops_after_crash_and_refuses_next_attempt(ready_config, tmp_path):
+    def crash(seconds):
+        if seconds == 123.0:
+            raise ConnectionError("연결 단절")
+
+    fake, arm, ledger, table, load = _carry(ready_config, tmp_path, crash)
+    with pytest.raises(ConnectionError):
+        run_carry_test(arm, ledger, ready_config, table, load, 123.0, 1)
+    assert len(fake.writes) == 6
+    fake2, arm2, _, _, load2 = _carry(ready_config, tmp_path)
+    with pytest.raises(SafetyViolation, match="중단"):
+        run_carry_test(arm2, ledger, ready_config, table, load2, 0.0, 2)
+    assert fake2.writes == []
+    # 한 번 닫힌 중단 기록도 다음 실행을 계속 막는다
+    fake3, arm3, _, _, load3 = _carry(ready_config, tmp_path)
+    with pytest.raises(SafetyViolation, match="중단"):
+        run_carry_test(arm3, ledger, ready_config, table, load3, 0.0, 3)
+    assert fake3.writes == []
 
 
 def test_counting_driver_counts_grip_writes(tmp_path):

@@ -239,6 +239,42 @@ def run_grip_test(arm: SafeArm, config: Config, table: PoseTable, load_block, ho
     arm.goto(PARK_POSE)
 
 
+CARRY_ATTEMPTS = 3
+
+
+def run_carry_test(
+    arm: SafeArm, ledger: AttemptLedger, config: Config, table: PoseTable, load_block, hold_s: float, attempt: int
+) -> None:
+    """구성 높이에서 집어 park까지 들고 갔다가 같은 자리에 내려놓는다. 판정은 관찰이고 재시도는 없다."""
+    if not 1 <= attempt <= CARRY_ATTEMPTS:
+        raise SafetyViolation(f"--attempt는 1~{CARRY_ATTEMPTS}이다")
+    ledger.bind(config_version=config.config_version, table_sha256=table.sha256())
+    ledger.close_interrupted()
+    finished, _ = ledger.state()
+    stopped = sorted(trial_id for trial_id, record in finished.items() if record.get("outcome") == "interrupted")
+    if stopped:
+        raise SafetyViolation(f"중단된 시도가 있어 더 진행하지 않는다: {stopped}")
+    trial = {**fit_trial(config, table), "trial_id": f"carry-{config.config_version}-{attempt}"}
+    if trial["trial_id"] in finished:
+        raise SafetyViolation(f"이미 수행한 시도다: {trial['trial_id']}")
+    hover = Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"])
+    grasp = Pose(GRASP, trial["r_index"], trial["j1"], trial["j5"])
+    arm.goto(PARK_POSE)
+    load_block(trial)
+    ledger.start(trial, joints_grasp=arm.gate.joints(grasp), joints_hover=arm.gate.joints(hover))
+    arm.goto(grasp)
+    arm.set_grip("close")
+    arm.goto(hover)
+    arm.goto(PARK_POSE)
+    arm.sleep(hold_s)
+    arm.goto(hover)
+    arm.goto(grasp)
+    arm.set_grip("open")
+    arm.goto(hover)
+    arm.goto(PARK_POSE)
+    ledger.finish(trial["trial_id"], outcome="ok", success=True, reason="명령 완료, 관찰은 세션 문서")
+
+
 def descend_and_stop(arm: SafeArm, config: Config, table: PoseTable) -> None:
     """전원 차단 거동 확인용. 낮은 자세까지 간 뒤 복귀하지 않고 끝난다. 서보가 그 자세를 유지한다."""
     trial = ladder_sheet(config, table)[2]
@@ -270,7 +306,8 @@ def _driver(approval: SessionApproval, used: int) -> RemoteArm:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test"])
+    parser.add_argument("--attempt", type=int)
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
     parser.add_argument("--session", type=Path, required=True)
@@ -304,7 +341,9 @@ def main() -> None:
         (folder / "block_ready").write_text("1")
         print("물체 적재 확인을 기록했다")
         return
-    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test") and not args.start_confirmed:
+    if args.command == "carry-test" and args.attempt is None:
+        raise SystemExit("--attempt가 필요하다")
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test") and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command == "ladder":
         require_previous_observation(folder, args.z_offset)
@@ -324,6 +363,8 @@ def main() -> None:
             run_fit(arm, config, table, loader, min(args.hold_sec, 60.0))
         elif args.command == "grip-test":
             run_grip_test(arm, config, table, loader, min(args.hold_sec, 60.0))
+        elif args.command == "carry-test":
+            run_carry_test(arm, AttemptLedger(folder / "carry.jsonl"), config, table, loader, min(args.hold_sec, 60.0), args.attempt)
         elif args.command == "descend":
             descend_and_stop(arm, config, table)
         elif args.command == "park":
