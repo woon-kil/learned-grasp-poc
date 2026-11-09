@@ -3,7 +3,7 @@
 
 촬영: uv run python scripts/marker_precheck2.py shoot --out runs/marker-top-2
 가져오기: uv run python scripts/marker_precheck2.py fetch --out runs/marker-top-2
-분석: uv run --with opencv-contrib-python-headless==5.0.0.93 python scripts/marker_precheck2.py analyze --dir runs/marker-top-2/frames --p3-photo-covered yes --edge-photo-ok yes
+분석: uv run --with opencv-contrib-python-headless==5.0.0.93 python scripts/marker_precheck2.py analyze --dir runs/marker-top-2/frames --p3-photo-covered yes
 """
 import argparse
 import hashlib
@@ -102,12 +102,16 @@ def shoot(out: Path) -> None:
     camera = P620Camera(str(out / "frames"), host=HOST)
     try:
         plan = steps()
-        log = {"session_id": uuid.uuid4().hex, "host": HOST, "complete": False, "p3_covered": None, "steps": []}
+        log = {"session_id": uuid.uuid4().hex, "host": HOST, "complete": False, "p3_covered": None, "edge_confirmed": {}, "steps": []}
         for number, (name, text, shots) in enumerate(plan, 1):
             if name == "P3-base":
                 while input(f"({number}/{len(plan)}) {text}. 손을 빼고, 보드 마커가 위에서 안 보이면 y 입력 후 Enter: ").strip().lower() != "y":
                     print("  아직 찍지 않았다. 다시 놓는다.")
                 log["p3_covered"] = "y"
+            elif name.startswith("E"):
+                while input(f"({number}/{len(plan)}) {text}. 손을 빼고, 블록 전체가 종이 위이고 지정 가장자리에 닿았으면 y 입력 후 Enter: ").strip().lower() != "y":
+                    print("  아직 찍지 않았다. 다시 놓는다.")
+                log["edge_confirmed"][name] = "y"
             else:
                 input(f"({number}/{len(plan)}) {text}. 손을 빼고 Enter: ")
             for index in range(shots):
@@ -121,7 +125,7 @@ def shoot(out: Path) -> None:
         camera.close()
 
 
-def analyze(folder: Path, p3_photo_covered: bool, edge_photo_ok: bool) -> dict:
+def analyze(folder: Path, p3_photo_covered: bool) -> dict:
     installed = importlib.metadata.version("opencv-contrib-python-headless")
     if installed != OPENCV_VERSION:
         sys.exit(f"판정 중단: OpenCV {installed}, 계약은 {OPENCV_VERSION}")
@@ -204,7 +208,7 @@ def analyze(folder: Path, p3_photo_covered: bool, edge_photo_ok: bool) -> dict:
             reference_points[i].append(center)
         frames[name] = {"sha256": digest, "outer": {str(i): [round(float(v), 3) for v in c] for i, c in centers.items()}}
 
-    report: dict = {"opencv": installed, "cv2": cv2.__version__, "p3_covered_answer": log.get("p3_covered"), "session_id": log["session_id"], "p3_photo_covered": p3_photo_covered, "edge_photo_ok": edge_photo_ok, "places": {}, "judge": [], "valid": True, "measure_pass": None, "judge_pass": None, "pass": None}
+    report: dict = {"opencv": installed, "cv2": cv2.__version__, "p3_covered_answer": log.get("p3_covered"), "session_id": log["session_id"], "p3_photo_covered": p3_photo_covered, "edge_confirmed": log.get("edge_confirmed"), "places": {}, "judge": [], "valid": True, "measure_pass": None, "judge_pass": None, "pass": None}
     measured = {place: measure(f"{place}-base", STATIC_SHOTS) for place in PLACES}
     report["board_tag"] = {place: f"{board}/{STATIC_SHOTS}" for place, (_, board) in measured.items()}
     report["valid"] = measured["P1"][1] >= MIN_STATIC and measured["P3"][1] <= STATIC_SHOTS - MIN_STATIC and log.get("p3_covered") == "y" and p3_photo_covered
@@ -275,7 +279,7 @@ def analyze(folder: Path, p3_photo_covered: bool, edge_photo_ok: bool) -> dict:
         for after in names:
             judged_ok = check(base, after, False) and judged_ok
         judged_ok = check(base, f"{place}-removed-00", True) and judged_ok
-    if edge_photo_ok:
+    if all((log.get("edge_confirmed") or {}).get(f"{name}-00") == "y" for name in EDGES):
         for name in EDGES:
             judged_ok = check("P2-base-00", f"{name}-00", False) and judged_ok
         report["judge_pass"] = bool(judged_ok)
@@ -288,7 +292,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=["shoot", "fetch", "analyze"])
     parser.add_argument("--p3-photo-covered", choices=["yes", "no"])
-    parser.add_argument("--edge-photo-ok", choices=["yes", "no"])
     parser.add_argument("--out", type=Path, default=Path("runs/marker-top-2"))
     parser.add_argument("--dir", type=Path)
     args = parser.parse_args()
@@ -300,9 +303,9 @@ def main() -> int:
         return 0
     if args.command == "fetch":
         return fetch(args.out)
-    if args.p3_photo_covered is None or args.edge_photo_ok is None:
-        sys.exit("--p3-photo-covered, --edge-photo-ok 필요: 사진을 사람이 본 결과")
-    report = analyze(args.dir, args.p3_photo_covered == "yes", args.edge_photo_ok == "yes")
+    if args.p3_photo_covered is None:
+        sys.exit("--p3-photo-covered 필요: 분석 전에 기록·커밋한 P3 사진 확인 결과")
+    report = analyze(args.dir, args.p3_photo_covered == "yes")
     (args.dir.parent / "analysis.json").write_text(json.dumps(report, ensure_ascii=False, indent=1))
     print(json.dumps({k: v for k, v in report.items() if k != "frames"}, ensure_ascii=False, indent=1))
     return 0
