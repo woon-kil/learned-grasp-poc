@@ -163,7 +163,14 @@ def _bind(arm: SafeArm, ledger: AttemptLedger, table: PoseTable) -> None:
     ledger.bind(config_version=arm.gate.config.config_version, table_sha256=table.sha256())
 
 
-def run_dryrun(arm: SafeArm, ledger: AttemptLedger, sheet: list[dict], observer: Observer, table: PoseTable) -> None:
+def run_dryrun(
+    arm: SafeArm,
+    ledger: AttemptLedger,
+    sheet: list[dict],
+    observer: Observer,
+    table: PoseTable,
+    at_grasp: Callable[[], None] | None = None,
+) -> None:
     """빈 그리퍼 드라이런. 관찰자가 이상을 보고하면 즉시 끝낸다."""
     _bind(arm, ledger, table)
     ledger.close_interrupted()
@@ -180,6 +187,8 @@ def run_dryrun(arm: SafeArm, ledger: AttemptLedger, sheet: list[dict], observer:
         ledger.start(trial, joints_hover=arm.gate.joints(_pose(HOVER, trial)), joints_grasp=arm.gate.joints(_pose(GRASP, trial)))
         arm.goto(_pose(HOVER, trial))
         arm.goto(_pose(GRASP, trial))
+        if at_grasp is not None:
+            at_grasp()
         arm.goto(_pose(HOVER, trial))
         arm.goto(PARK_POSE)
         outcome = observer(trial)

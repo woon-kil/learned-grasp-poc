@@ -76,6 +76,22 @@ def test_ladder_commands_only_one_descent(ready_config, tmp_path):
     assert fake.writes[-1][0] == config.park
 
 
+def test_hold_adds_no_writes_and_waits_at_grasp(ready_config, tmp_path):
+    config = ladder_config(ready_config, 60)
+    table = generate(config.table)
+    fake = FakeArm()
+    held = []
+
+    def sleep(seconds):
+        held.append((seconds, fake.writes[-1][0]))
+
+    arm = SafeArm(fake, SafetyGate(config, table), sleep=sleep)
+    run_ladder(arm, AttemptLedger(tmp_path / "h.jsonl", clock=lambda: 0.0), config, table, hold_s=40.0)
+    assert len(fake.writes) == 5
+    entry = table.entries[len(table.entries) // 2]
+    assert (40.0, (90, *entry.grasp, 90)) in held
+
+
 def test_ladder_records_do_not_mix_between_offsets(ready_config):
     versions = {ladder_config(ready_config, offset).config_version for offset in LADDER_OFFSETS_MM}
     assert len(versions) == len(LADDER_OFFSETS_MM)

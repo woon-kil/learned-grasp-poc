@@ -117,8 +117,10 @@ def read_start_joints(driver, folder: Path) -> tuple[int, ...]:
     return tuple(reading["values"][:5])
 
 
-def run_ladder(arm: SafeArm, ledger: AttemptLedger, config: Config, table: PoseTable) -> None:
-    run_dryrun(arm, ledger, ladder_sheet(config, table), _unobserved, table)
+def run_ladder(arm: SafeArm, ledger: AttemptLedger, config: Config, table: PoseTable, hold_s: float = 0.0) -> None:
+    """hold_s 동안 파지 자세에 머물러 사진과 관찰을 받는다. 추가 쓰기는 없다."""
+    at_grasp = (lambda: arm.sleep(hold_s)) if hold_s > 0 else None
+    run_dryrun(arm, ledger, ladder_sheet(config, table), _unobserved, table, at_grasp)
 
 
 def _unobserved(trial: dict) -> Outcome:
@@ -148,6 +150,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("config/workspace.yaml"))
     parser.add_argument("--z-offset", type=float)
     parser.add_argument("--start-confirmed", action="store_true", help="사용자가 빈 그리퍼, 시작 자세, park 경로를 확인했다")
+    parser.add_argument("--hold-sec", type=float, default=0.0)
     parser.add_argument("--ok", action="store_true")
     parser.add_argument("--note", default="")
     args = parser.parse_args()
@@ -183,7 +186,7 @@ def main() -> None:
         start = read_start_joints(driver, folder)
         arm = SafeArm(CountingDriver(driver, counter, approval.max_writes), SafetyGate(config, table), start_joints=start)
         if args.command == "ladder":
-            run_ladder(arm, AttemptLedger(folder / f"ladder-z{args.z_offset:g}.jsonl"), config, table)
+            run_ladder(arm, AttemptLedger(folder / f"ladder-z{args.z_offset:g}.jsonl"), config, table, min(args.hold_sec, 60.0))
         else:
             run_dryrun(arm, AttemptLedger(folder / "dryrun.jsonl"), dryrun_sheet(config, table), _unobserved, table)
         print(f"완료. 세션 쓰기 누적 {counter.read_text()}회. 무간섭은 관찰 기록으로만 판정한다.")
