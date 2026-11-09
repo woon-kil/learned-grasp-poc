@@ -91,6 +91,10 @@ def fetch(out: Path) -> int:
     return 1 if missing else 0
 
 
+class PreviewError(RuntimeError):
+    pass
+
+
 def _detectors():
     import cv2
 
@@ -115,6 +119,8 @@ def board_visible(image, tags) -> bool:
     """미리보기 판단. 보드 마커 id 1만 본다. 윗면 마커와 바깥쪽 마커 값은 쓰지 않는다."""
     import cv2
 
+    if image is None:
+        raise PreviewError("미리보기 사진을 읽지 못했다")
     x0, y0, x1, y1 = ROI
     crop = cv2.resize(image[y0:y1, x0:x1], None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_CUBIC)
     return BOARD_ID in _ids(tags, crop)
@@ -127,8 +133,12 @@ def _take_preview(camera, out: Path, name: str):
     frames = out / "previews"
     frames.mkdir(exist_ok=True)
     source = f"{HOST}:projects/learned-grasp-poc/{out}/frames/{name}.color.png"
-    subprocess.run(["scp", "-q", source, str(frames / f"{name}.color.png")], check=True)
-    return cv2.imread(str(frames / f"{name}.color.png"))
+    if subprocess.run(["scp", "-q", source, str(frames / f"{name}.color.png")]).returncode != 0:
+        raise PreviewError(f"미리보기 사진을 가져오지 못했다: {name}")
+    image = cv2.imread(str(frames / f"{name}.color.png"))
+    if image is None:
+        raise PreviewError(f"미리보기 사진을 읽지 못했다: {name}")
+    return image
 
 
 def shoot(out: Path) -> None:
@@ -162,15 +172,32 @@ def shoot(out: Path) -> None:
                     else:
                         input(f"({number}/{len(plan)}) {text}. 손을 빼고 Enter: ")
                     attempt += 1
-                    visible = board_visible(_take_preview(camera, out, f"preview-{place}-{attempt:02d}"), tags)
                     log["preview_attempts"][place] = attempt
+                    try:
+                        visible = board_visible(_take_preview(camera, out, f"preview-{place}-{attempt:02d}"), tags)
+                    except PreviewError as error:
+                        print(f"  {error}. 시험 사진은 찍지 않았다. Enter로 다시 확인한다.")
+                        continue
                     if visible == PREVIEW_WANT[place]:
                         print("  자리 확인 통과")
                         break
                     print("  자리가 아니다: 카메라에 보드 마커가 " + ("안 보인다. 블록을 베이스 쪽으로 옮긴다." if PREVIEW_WANT[place] else "보인다. 더 덮어 놓는다."))
             elif name.startswith("E"):
-                while input(f"({number}/{len(plan)}) {text}. 손을 빼고, 블록 전체가 종이 위이고 지정 가장자리에 닿았으면 y 입력 후 Enter: ").strip().lower() != "y":
-                    print("  아직 찍지 않았다. 다시 놓는다.")
+                attempt = 0
+                while True:
+                    while input(f"({number}/{len(plan)}) {text}. 손을 빼고, 블록 전체가 종이 위이고 지정 가장자리에 닿았으면 y 입력 후 Enter: ").strip().lower() != "y":
+                        print("  아직 찍지 않았다. 다시 놓는다.")
+                    attempt += 1
+                    log["preview_attempts"][name] = attempt
+                    try:
+                        seen = _ids(outer, _take_preview(camera, out, f"preview-{name}-{attempt:02d}"))
+                    except PreviewError as error:
+                        print(f"  {error}. 시험 사진은 찍지 않았다. y로 다시 확인한다.")
+                        continue
+                    if set(REFERENCE_IDS) <= seen:
+                        print("  자리 확인 통과")
+                        break
+                    print("  자리가 아니다: 오른쪽 큰 마커가 가려졌다. 블록을 큰 마커에서 떨어뜨려 놓는다.")
                 log["edge_confirmed"][name] = "y"
             else:
                 input(f"({number}/{len(plan)}) {text}. 손을 빼고 Enter: ")
