@@ -1,0 +1,19 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.context/
+.advisory/
+*.pt
+*.pth
+*.onnx
+data/*
+!data/.gitkeep
+runs/*
+!runs/.gitkeep
+# 라이선스 표기가 없는 제조사 모델. 로컬 전용
+assets/urdf/

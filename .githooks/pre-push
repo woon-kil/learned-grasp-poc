@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# 푸시 정책. 정본은 .cursor/rules/git-autonomy.mdc
+# safe_push.sh가 표준 경로이고 이 훅은 추가 방어선이다.
+# 활성화(사용자): git config core.hooksPath .githooks
+# 전역 hooksPath의 Git LFS 훅을 대체한다. 이 저장소는 LFS를 쓰지 않는다.
+set -euo pipefail
+
+zero="0000000000000000000000000000000000000000"
+
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  if [ "${remote_ref}" != "refs/heads/main" ]; then
+    echo "거절: 푸시 대상은 main뿐이다 (${remote_ref})." >&2
+    exit 1
+  fi
+  if [ "${local_sha}" = "${zero}" ]; then
+    echo "거절: main 삭제 금지." >&2
+    exit 1
+  fi
+  if [ "${local_sha}" != "$(git rev-parse HEAD)" ]; then
+    echo "거절: 검사한 HEAD와 푸시할 커밋이 다르다." >&2
+    exit 1
+  fi
+  if [ "${remote_sha}" != "${zero}" ] && ! git merge-base --is-ancestor "${remote_sha}" "${local_sha}"; then
+    echo "거절: 이력 재작성(force) 금지." >&2
+    exit 1
+  fi
+done
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "거절: 커밋하지 않은 변경이 있다. 검사 결과가 푸시 내용과 달라진다." >&2
+  exit 1
+fi
+
+bash scripts/public_check.sh
+uv run pytest -q

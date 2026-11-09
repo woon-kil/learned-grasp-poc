@@ -1,0 +1,12 @@
+{
+  "session_id": "G0a-YYMMDD-1",
+  "gate": "G0a",
+  "target": "DOFBOT Pro, 빈 그리퍼",
+  "scope": "허용 표 드라이런, park-hover-grasp 전이만",
+  "max_writes": 0,
+  "observation": "간섭, 케이블, 예상 밖 움직임",
+  "stop_condition": "예상 밖 움직임 또는 접촉 시 전원 차단",
+  "power_cut_operator": "사용자",
+  "approved_by": "",
+  "expires_at": "2026-01-01T00:00:00+09:00"
+}
