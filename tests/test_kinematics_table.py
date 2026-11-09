@@ -84,3 +84,8 @@ def test_chain_records_source_model():
     chain = json.loads(CHAIN_PATH.read_text(encoding="utf-8"))
     assert chain["source_urdf_sha256"] == "b626a845cd67998cd5ce47f2b3d302d9cb3e5b9da764d9a1e7e1404a277ccc28"
     assert [joint["name"] for joint in chain["joints"]][-1] == "Gripping_point_Joint"
+
+
+def test_hover_keeps_j3_j4_away_from_read_boundary(table):
+    assert len(table.entries) == 10
+    assert all(entry.hover[1] >= 5 and entry.hover[2] >= 5 for entry in table.entries)

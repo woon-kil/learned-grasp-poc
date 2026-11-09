@@ -419,3 +419,12 @@ def test_start_read_is_recorded(tmp_path):
 
     assert read_start_joints(Good(), tmp_path) == (82, 85, 25, 0, 90)
     assert (tmp_path / "start_read.json").exists()
+
+
+def test_start_read_none_refuses_before_any_write(tmp_path):
+    class NoneRead:
+        def read(self):
+            return {"ok": True, "values": [90, 90, 90, None, 90, 100], "status": ["sdk_return"] * 3 + ["fail"] + ["sdk_return"] * 2}
+
+    with pytest.raises(SafetyViolation, match="시작 조회 실패"):
+        read_start_joints(NoneRead(), tmp_path)

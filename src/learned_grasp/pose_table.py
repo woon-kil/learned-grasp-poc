@@ -23,6 +23,8 @@ _J4 = np.arange(0, 121)
 _HOVER_R_TOL_MM = 2.0
 _HOVER_Z_TOL_MM = 3.0
 _HOVER_MAX_TILT = 50.0
+# SDK 조회는 J2~J4가 0도 아래로 읽히면 None이다. 쥔 채 hover에서 J4 None으로 멈춘 일이 있었다(G0b-6). 미검증 후보값이다.
+_HOVER_MIN_J3_J4 = 5
 
 
 class TableError(ValueError):
@@ -48,7 +50,12 @@ def generate(spec: TableSpec) -> "PoseTable":
     grid, position, tilt = _grid()
     r_axis, z_axis = position[:, 1], position[:, 2]
     grasp_mask = (np.abs(z_axis - spec.z_grasp_mm) <= spec.z_tol_mm) & (np.abs(tilt - spec.tilt_deg) <= spec.tilt_tol_deg)
-    hover_mask = (np.abs(z_axis - (spec.z_grasp_mm + spec.hover_lift_mm)) <= _HOVER_Z_TOL_MM) & (tilt <= _HOVER_MAX_TILT)
+    hover_mask = (
+        (np.abs(z_axis - (spec.z_grasp_mm + spec.hover_lift_mm)) <= _HOVER_Z_TOL_MM)
+        & (tilt <= _HOVER_MAX_TILT)
+        & (grid[:, 1] >= _HOVER_MIN_J3_J4)
+        & (grid[:, 2] >= _HOVER_MIN_J3_J4)
+    )
     entries: list[TableEntry] = []
     previous: np.ndarray | None = None
     for nominal in np.arange(spec.r_min_mm, spec.r_max_mm + 1e-6, spec.r_step_mm):

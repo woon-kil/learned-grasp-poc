@@ -256,3 +256,18 @@ def test_grip_does_not_resend_arm_and_skips_when_unchanged(ready_config, table):
     arm.set_grip("close")
     assert recording.arm_writes == before  # 팔 5축을 재전송하지 않는다
     assert recording.writes[-1][1] == ready_config.close_sdk
+
+
+def test_arrival_read_none_stops_further_writes(ready_config, table):
+    class NoneRead(FakeArm):
+        def read(self):
+            return {"ok": True, "values": [90, 90, 90, None, 90, 100], "status": ["sdk_return"] * 3 + ["fail"] + ["sdk_return"] * 2}
+
+    driver = NoneRead()
+    arm = SafeArm(driver, SafetyGate(ready_config, table), sleep=lambda _: None)
+    with pytest.raises(SafetyViolation):
+        arm.goto(PARK_POSE)
+    assert len(driver.writes) == 1
+    with pytest.raises(SafetyViolation):
+        arm.goto(hover())
+    assert len(driver.writes) == 1
