@@ -85,6 +85,17 @@ def dryrun_sheet(config: Config, table: PoseTable) -> list[dict]:
     ]
 
 
+def _offset_index(table: PoseTable, r_index: int, offset_mm: float) -> int:
+    """오프셋에 가장 가까운 표 항목. 표 간격 때문에 기준 항목이나 반대쪽으로 되돌아가면 지정 방향의 다음 항목을 쓴다."""
+    step = 1 if offset_mm > 0 else -1
+    index = table.nearest_index(table.entries[r_index].r_mm + offset_mm)
+    if (index - r_index) * step <= 0:
+        index = r_index + step
+    if not 0 <= index < len(table.entries):
+        raise ValueError(f"표 끝을 넘는 오프셋: r_index={r_index}, offset={offset_mm}")
+    return index
+
+
 def offset_sheet(config: Config, table: PoseTable, seed: int, cells: int = 3) -> list[dict]:
     """G0d. 놓은 자세에서 명령만 어긋나게 해 허용 오차를 잰다. 오프셋은 모델 좌표다."""
     rng = random.Random(seed)
@@ -96,7 +107,7 @@ def offset_sheet(config: Config, table: PoseTable, seed: int, cells: int = 3) ->
     for cell, r_index in enumerate(centers):
         base = table.entries[r_index].r_mm
         mm_per_j1_deg = math.radians(1.0) * base
-        variants = [("r", sign * value, table.nearest_index(base + sign * value), j1_mid, j5_mid) for value in R_OFFSETS_MM for sign in (1, -1)]
+        variants = [("r", sign * value, _offset_index(table, r_index, sign * value), j1_mid, j5_mid) for value in R_OFFSETS_MM for sign in (1, -1)]
         variants += [
             ("lateral", sign * value, r_index, j1_mid + sign * max(1, round(value / mm_per_j1_deg)), j5_mid)
             for value in LATERAL_OFFSETS_MM
