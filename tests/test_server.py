@@ -4,6 +4,7 @@ import ast
 import json
 from pathlib import Path
 
+import subprocess
 import sys
 
 import pytest
@@ -63,6 +64,70 @@ def test_valid_session():
     assert writes == 1
     assert devices[0].writes == [(90, 90, 90, 90, 90, 100, 1500)]
     assert responses[2]["status"] == ["sdk_return"] * 6
+
+
+def test_grip_writes_only_servo_six():
+    class Recording(FakeDevice):
+        def __init__(self):
+            super().__init__()
+            self.single = []
+
+        def Arm_serial_servo_write(self, *args):
+            self.single.append(args)
+
+    devices = []
+
+    def factory():
+        devices.append(Recording())
+        return devices[-1]
+
+    responses = []
+    writes = server.serve(factory, [json.dumps(HELLO), json.dumps({"op": "grip", "angle": 120, "time_ms": 1500})], responses.append, TOKEN, 5)
+    assert writes == 1 and devices[0].single == [(6, 120, 1500)] and devices[0].writes == []
+
+
+def test_grip_range_and_cap_enforced():
+    class Recording(FakeDevice):
+        def Arm_serial_servo_write(self, *args):
+            self.writes.append(args)
+
+    devices = []
+
+    def factory():
+        devices.append(Recording())
+        return devices[-1]
+
+    bad = {"op": "grip", "angle": 200, "time_ms": 1500}
+    assert server.serve(factory, [json.dumps(HELLO), json.dumps(bad)], lambda _: None, TOKEN, 5) == 0
+    good = {"op": "grip", "angle": 120, "time_ms": 1500}
+    assert server.serve(factory, [json.dumps(HELLO), json.dumps(good), json.dumps(good)], lambda _: None, TOKEN, 1) == 1
+
+
+class PrintingDevice(FakeDevice):
+    """실제 Arm_Lib처럼 I2C 오류를 예외 없이 print만 한다."""
+
+    def Arm_serial_servo_write6(self, *args):
+        print("Arm_serial_servo_write6 I2C error")
+
+    def Arm_serial_servo_read(self, servo_id):
+        print("Arm_serial_servo_read I2C error")
+
+
+def test_silent_sdk_write_failure_ends_session(capsys):
+    responses = []
+    writes = server.serve(PrintingDevice, [json.dumps(HELLO), json.dumps(WRITE), json.dumps(WRITE)], responses.append, TOKEN, 5)
+    assert writes == 1
+    last = json.loads(responses[-1])
+    assert last["ok"] is False and "I2C error" in last["error"]
+    assert len(responses) == 2  # 뒤따르는 쓰기를 보내지 않는다
+    assert capsys.readouterr().out == ""  # JSON 통신 채널을 오염시키지 않는다
+
+
+def test_silent_sdk_read_failure_is_marked_fail(capsys):
+    responses = []
+    server.serve(PrintingDevice, [json.dumps(HELLO), json.dumps({"op": "read"})], responses.append, TOKEN, 5)
+    assert json.loads(responses[-1])["status"] == ["fail"] * 6
+    assert capsys.readouterr().out == ""
 
 
 def test_input_end_stops_processing():
@@ -137,7 +202,7 @@ def test_server_is_standalone():
         if isinstance(node, ast.ImportFrom):
             assert node.module in ("__future__", "Arm_Lib")
         elif isinstance(node, ast.Import):
-            assert all(alias.name in ("argparse", "json", "math", "sys") for alias in node.names)
+            assert all(alias.name in ("argparse", "contextlib", "io", "json", "math", "sys") for alias in node.names)
 
 
 def test_server_parses_on_python38():
@@ -199,6 +264,16 @@ def test_process_rejects_over_cap_and_client_raises(process_command):
         arm.write6((90, 90, 90, 90, 90), 100, 1500)
     assert arm.process.wait(timeout=5) == 0
     assert len(log.read_text().splitlines()) == 3
+
+
+def test_client_times_out_on_stalled_server(tmp_path):
+    """연결은 살아 있는데 서버가 멈춘 경우 무기한 기다리지 않는다."""
+    arm = RemoteArm.__new__(RemoteArm)
+    arm.process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    with pytest.raises(ConnectionError, match="응답하지"):
+        arm._call({"op": "read"}, timeout_s=0.2)
+    arm.close()
+    assert arm.process.poll() is not None
 
 
 def test_client_detects_dead_server(process_command):

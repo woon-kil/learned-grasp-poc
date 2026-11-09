@@ -1,0 +1,195 @@
+"""실기 세션 실행. 사용자가 승인한 세션 파일 없이는 드라이버를 만들지 않는다.
+
+사용:
+  python -m learned_grasp.session read    --session runs/G0a-1/approval.json
+  python -m learned_grasp.session ladder  --session runs/G0a-1/approval.json --z-offset 60 --start-confirmed
+  python -m learned_grasp.session observe --session runs/G0a-1/approval.json --z-offset 60 --ok --note "간격 충분"
+  python -m learned_grasp.session dryrun  --session runs/G0a-1/approval.json --start-confirmed
+
+대화형 입력이 없다. 감독자는 전원 차단으로 멈춘다. --start-confirmed는 사용자가 빈 그리퍼, 시작 자세,
+park까지의 경로를 눈으로 확인했다고 답한 뒤에만 붙인다. 높이 탐색은 앞 단계의 관찰 통과 기록이 있어야 다음 단계로 간다.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+from dataclasses import replace
+from pathlib import Path
+
+from learned_grasp.arm import RemoteArm, SafeArm, SessionApproval, load_approval
+from learned_grasp.attempts import AttemptLedger
+from learned_grasp.config import Config, load_config
+from learned_grasp.g0_runner import Outcome, dryrun_sheet, run_dryrun
+from learned_grasp.pose_table import PoseTable, generate
+from learned_grasp.safety import SafetyGate, SafetyViolation
+
+# 베이스 바닥 = 작업대 가정이 미검증이라 가정 높이보다 위에서 시작해 내려온다.
+LADDER_OFFSETS_MM = (60, 40, 25, 15, 8, 4, 0)
+
+
+class CountingDriver:
+    """세션 전체의 쓰기 수를 파일에 누적해 승인 범위를 넘지 못하게 한다."""
+
+    def __init__(self, driver, path: Path, limit: int):
+        self.driver = driver
+        self.path = Path(path)
+        self.limit = limit
+
+    def used(self) -> int:
+        return int(self.path.read_text()) if self.path.exists() else 0
+
+    def write6(self, q5, grip, time_ms):
+        used = self.used()
+        if used >= self.limit:
+            raise SafetyViolation(f"세션 쓰기 상한 {self.limit}회에 도달했다")
+        self._count(used + 1)
+        self.driver.write6(q5, grip, time_ms)
+
+    def write_grip(self, grip, time_ms):
+        used = self.used()
+        if used >= self.limit:
+            raise SafetyViolation(f"세션 쓰기 상한 {self.limit}회에 도달했다")
+        self._count(used + 1)
+        self.driver.write_grip(grip, time_ms)
+
+    def _count(self, value: int) -> None:
+        """전송 전에 원자적으로 저장한다. 전송 실패도 쓴 것으로 센다."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        with temporary.open("w") as handle:
+            handle.write(str(value))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self.path)
+
+    def read(self):
+        return self.driver.read()
+
+    def close(self):
+        self.driver.close()
+
+
+def ladder_config(config: Config, offset_mm: float) -> Config:
+    """높이 탐색 표의 구성. 구성 버전에 오프셋을 넣어 기록이 섞이지 않게 한다."""
+    table = replace(config.table, z_grasp_mm=config.table.z_grasp_mm + offset_mm)
+    return replace(config, table=table, config_version=f"{config.config_version}+z{offset_mm:g}")
+
+
+def ladder_sheet(config: Config, table: PoseTable) -> list[dict]:
+    """표 중앙 반경, J1·J5 범위 중앙 한 자세만 내려간다."""
+    return [
+        {
+            "trial_id": f"ladder-{config.config_version}",
+            "r_index": len(table.entries) // 2,
+            "j1": sum(config.j1_range) // 2,
+            "j5": sum(config.j5_range) // 2,
+        }
+    ]
+
+
+def record_observation(folder: Path, offset: float, ok: bool, note: str) -> None:
+    with (folder / "observations.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"z_offset": offset, "ok": ok, "note": note}, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def require_previous_observation(folder: Path, offset: float) -> None:
+    """명령 완료는 관찰 통과가 아니다. 앞 단계의 사람 관찰 통과 없이는 더 내려가지 않는다."""
+    index = LADDER_OFFSETS_MM.index(offset)
+    path = folder / "observations.jsonl"
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    if any(not record["ok"] for record in records):
+        raise SafetyViolation("이상 관찰 기록이 있어 높이 탐색을 멈춘다. 새 세션이 필요하다")
+    if index > 0 and not any(record["z_offset"] == LADDER_OFFSETS_MM[index - 1] and record["ok"] for record in records):
+        raise SafetyViolation(f"앞 단계 z+{LADDER_OFFSETS_MM[index - 1]}의 관찰 통과 기록이 없다")
+
+
+def read_start_joints(driver, folder: Path) -> tuple[int, ...]:
+    """첫 쓰기 전 시작값을 읽어 남긴다. 거리 검사에만 쓰고 목표로 쓰지 않는다."""
+    reading = driver.read()
+    if reading.get("status") != ["sdk_return"] * 6:
+        raise SafetyViolation(f"시작 조회 실패로 이동하지 않는다: {reading}")
+    (folder / "start_read.json").write_text(json.dumps(reading, ensure_ascii=False) + "\n", encoding="utf-8")
+    return tuple(reading["values"][:5])
+
+
+def run_ladder(arm: SafeArm, ledger: AttemptLedger, config: Config, table: PoseTable) -> None:
+    run_dryrun(arm, ledger, ladder_sheet(config, table), _unobserved, table)
+
+
+def _unobserved(trial: dict) -> Outcome:
+    """프로그램은 무간섭을 판정하지 못한다. 이 성공은 명령 완료이고 관찰은 세션 문서에 따로 남긴다."""
+    return Outcome(True, "명령 완료, 관찰은 세션 문서")
+
+
+def _load_env(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip())
+
+
+def _driver(approval: SessionApproval, used: int) -> RemoteArm:
+    remaining = approval.max_writes - used
+    limited = SessionApproval(approval.session_id, approval.gate, max(remaining, 1), approval.token)
+    return RemoteArm(limited)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun"])
+    parser.add_argument("--session", type=Path, required=True)
+    parser.add_argument("--config", type=Path, default=Path("config/workspace.yaml"))
+    parser.add_argument("--z-offset", type=float)
+    parser.add_argument("--start-confirmed", action="store_true", help="사용자가 빈 그리퍼, 시작 자세, park 경로를 확인했다")
+    parser.add_argument("--ok", action="store_true")
+    parser.add_argument("--note", default="")
+    args = parser.parse_args()
+    _load_env()
+    config = load_config(args.config)
+    approval = load_approval(args.session, config)
+    folder = args.session.parent
+    lock = (folder / "session.lock").open("w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit("이 세션을 쓰는 다른 프로세스가 있다")
+    counter = folder / "writes.count"
+    used = int(counter.read_text()) if counter.exists() else 0
+
+    if args.command in ("ladder", "observe") and args.z_offset not in LADDER_OFFSETS_MM:
+        raise SystemExit(f"--z-offset는 {LADDER_OFFSETS_MM} 중 하나다")
+    if args.command == "observe":
+        record_observation(folder, args.z_offset, args.ok, args.note)
+        print(f"관찰 기록: z+{args.z_offset:g} ok={args.ok}")
+        return
+    if args.command in ("ladder", "dryrun") and not args.start_confirmed:
+        raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
+    if args.command == "ladder":
+        require_previous_observation(folder, args.z_offset)
+        config = ladder_config(config, args.z_offset)
+    table = generate(config.table)
+    driver = _driver(approval, used)
+    try:
+        if args.command == "read":
+            print(json.dumps(driver.read(), ensure_ascii=False))
+            return
+        start = read_start_joints(driver, folder)
+        arm = SafeArm(CountingDriver(driver, counter, approval.max_writes), SafetyGate(config, table), start_joints=start)
+        if args.command == "ladder":
+            run_ladder(arm, AttemptLedger(folder / f"ladder-z{args.z_offset:g}.jsonl"), config, table)
+        else:
+            run_dryrun(arm, AttemptLedger(folder / "dryrun.jsonl"), dryrun_sheet(config, table), _unobserved, table)
+        print(f"완료. 세션 쓰기 누적 {counter.read_text()}회. 무간섭은 관찰 기록으로만 판정한다.")
+    finally:
+        driver.close()
+
+
+if __name__ == "__main__":
+    main()

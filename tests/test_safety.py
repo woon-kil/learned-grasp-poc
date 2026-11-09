@@ -29,9 +29,10 @@ def grasp(index=0, j1=90, j5=90):
     return Pose(GRASP, index, j1, j5)
 
 
-def test_draft_config_cannot_build_gate(draft_config, table):
+@pytest.mark.parametrize("missing", ["park", "open_sdk", "close_sdk"])
+def test_config_without_motion_values_cannot_build_gate(draft_config, table, missing):
     with pytest.raises(ConfigError):
-        SafetyGate(draft_config, table)
+        SafetyGate(replace(draft_config, **{missing: None}), table)
 
 
 def test_first_move_must_be_park(arm, driver):
@@ -171,3 +172,67 @@ def test_example_session_file_is_not_approved(draft_config):
 
     with pytest.raises(ApprovalError):
         load_approval(ROOT / "config" / "session.example.json", draft_config)
+
+
+def test_first_move_uses_measured_distance(ready_config, table):
+    gate = SafetyGate(ready_config, table)
+    far = tuple(a + 60 for a in ready_config.park[:4]) + (ready_config.park[4],)
+    assert gate.move_time_ms(None, PARK_POSE, far) == max(ready_config.motion.first_move_time_ms, 60 * ready_config.motion.ms_per_deg)
+
+
+def test_first_move_too_far_is_refused_before_write(ready_config, table, driver):
+    start = (*ready_config.park[:4], ready_config.park[4] + ready_config.motion.max_move_deg + 1)
+    arm = SafeArm(driver, SafetyGate(ready_config, table), sleep=lambda _: None, start_joints=start)
+    with pytest.raises(SafetyViolation, match="첫 이동각"):
+        arm.goto(PARK_POSE)
+    assert driver.writes == []
+
+
+class LaggingArm(FakeArm):
+    """쓰기는 받지만 도착하지 않는 팔."""
+
+    def read(self):
+        return {"values": [0, 0, 0, 0, 0, 0], "status": ["sdk_return"] * 6}
+
+
+def test_no_further_write_when_arm_did_not_arrive(ready_config, table):
+    lagging = LaggingArm()
+    arm = SafeArm(lagging, SafetyGate(ready_config, table), sleep=lambda _: None)
+    with pytest.raises(SafetyViolation, match="미도달"):
+        arm.goto(PARK_POSE)
+    assert len(lagging.writes) == 1 and arm.pose is None
+
+
+def test_failed_arrival_read_blocks_next_write(ready_config, table):
+    class FailingRead(FakeArm):
+        def read(self):
+            return {"values": [None] * 6, "status": ["fail"] * 6}
+
+    failing = FailingRead()
+    arm = SafeArm(failing, SafetyGate(ready_config, table), sleep=lambda _: None)
+    with pytest.raises(SafetyViolation, match="조회 실패"):
+        arm.goto(PARK_POSE)
+    assert len(failing.writes) == 1
+
+
+def test_grip_does_not_resend_arm_and_skips_when_unchanged(ready_config, table):
+    class Recording(FakeArm):
+        def __init__(self):
+            super().__init__()
+            self.arm_writes = 0
+
+        def write6(self, q5, grip, time_ms):
+            self.arm_writes += 1
+            super().write6(q5, grip, time_ms)
+
+    recording = Recording()
+    arm = SafeArm(recording, SafetyGate(ready_config, table), sleep=lambda _: None)
+    arm.goto(PARK_POSE)
+    arm.set_grip("open")
+    assert len(recording.writes) == 1  # 첫 쓰기에 이미 개방이 포함됐다
+    arm.goto(hover())
+    arm.goto(grasp())
+    before = recording.arm_writes
+    arm.set_grip("close")
+    assert recording.arm_writes == before  # 팔 5축을 재전송하지 않는다
+    assert recording.writes[-1][1] == ready_config.close_sdk

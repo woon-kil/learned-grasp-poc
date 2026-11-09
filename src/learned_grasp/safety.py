@@ -65,11 +65,16 @@ class SafetyGate:
         ):
             raise SafetyViolation("hover와 grasp 사이에는 r, J1, J5를 바꿀 수 없다")
 
-    def move_time_ms(self, current: Pose | None, target: Pose) -> int:
-        """이동시간 하한. 시작 자세를 모르면 first_move_time_ms를 쓴다."""
+    def move_time_ms(self, current: Pose | None, target: Pose, start_joints: tuple[int, ...] | None = None) -> int:
+        """이동시간 하한. 첫 이동은 조회한 시작값이 있으면 그 거리로도 검사한다. 시작값은 목표로 쓰지 않는다."""
         motion = self.config.motion
         if current is None:
-            return motion.first_move_time_ms
+            if start_joints is None:
+                return motion.first_move_time_ms
+            delta = max(abs(a - b) for a, b in zip(start_joints, self.joints(target)))
+            if delta > motion.max_move_deg:
+                raise SafetyViolation(f"시작 자세에서 첫 이동각 {delta}도가 상한 {motion.max_move_deg}도를 넘는다")
+            return max(motion.first_move_time_ms, delta * motion.ms_per_deg)
         delta = max(abs(a - b) for a, b in zip(self.joints(current), self.joints(target)))
         if delta > motion.max_move_deg:
             raise SafetyViolation(f"1회 이동각 {delta}도가 상한 {motion.max_move_deg}도를 넘는다")

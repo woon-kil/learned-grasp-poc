@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import math
 import sys
@@ -36,6 +38,18 @@ def _valid_write(q, time_ms):
     if isinstance(time_ms, bool) or not isinstance(time_ms, int) or time_ms < MIN_TIME_MS:
         return "이동시간 하한 %d ms 미달" % MIN_TIME_MS
     return None
+
+
+def _sdk_call(function, *args):
+    """SDK를 호출하고 출력을 잡는다.
+
+    Arm_Lib은 I2C 오류와 범위 초과를 예외 없이 print만 하고 넘어간다.
+    출력을 실패로 보지 않으면 실패한 쓰기가 성공으로 보고되고 JSON 통신이 깨진다.
+    """
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        result = function(*args)
+    return result, captured.getvalue().strip()
 
 
 def serve(device_factory, lines, write_line, token, max_writes):
@@ -73,16 +87,33 @@ def serve(device_factory, lines, write_line, token, max_writes):
                 write_line(json.dumps({"ok": False, "error": error}))
                 break
             q = request["q"]
-            device.Arm_serial_servo_write6(q[0], q[1], q[2], q[3], q[4], q[5], request["time_ms"])
+            _, sdk_output = _sdk_call(device.Arm_serial_servo_write6, q[0], q[1], q[2], q[3], q[4], q[5], request["time_ms"])
             writes += 1
+            if sdk_output:
+                write_line(json.dumps({"ok": False, "error": "SDK 쓰기 실패: " + sdk_output, "writes": writes}))
+                break
+            write_line(json.dumps({"ok": True, "writes": writes}))
+        elif operation == "grip":
+            angle, time_ms = request.get("angle"), request.get("time_ms")
+            error = _valid_write([90, 90, 90, 90, 90, angle], time_ms)
+            if error is None and writes >= max_writes:
+                error = "세션 쓰기 상한 초과"
+            if error is not None:
+                write_line(json.dumps({"ok": False, "error": error}))
+                break
+            _, sdk_output = _sdk_call(device.Arm_serial_servo_write, 6, angle, time_ms)
+            writes += 1
+            if sdk_output:
+                write_line(json.dumps({"ok": False, "error": "SDK 쓰기 실패: " + sdk_output, "writes": writes}))
+                break
             write_line(json.dumps({"ok": True, "writes": writes}))
         elif operation == "read":
             values = []
             status = []
             for servo_id in range(1, 7):
-                value = device.Arm_serial_servo_read(servo_id)
+                value, sdk_output = _sdk_call(device.Arm_serial_servo_read, servo_id)
                 values.append(value)
-                status.append(classify(servo_id, value))
+                status.append("fail" if sdk_output else classify(servo_id, value))
             write_line(json.dumps({"ok": True, "values": values, "status": status}))
         else:
             write_line(json.dumps({"ok": False, "error": "알 수 없는 op"}))
@@ -93,7 +124,10 @@ def serve(device_factory, lines, write_line, token, max_writes):
 def _real_device():
     from Arm_Lib import Arm_Device
 
-    return Arm_Device()
+    device, sdk_output = _sdk_call(Arm_Device)
+    if sdk_output:
+        raise RuntimeError("SDK 생성 출력: " + sdk_output)
+    return device
 
 
 def main():

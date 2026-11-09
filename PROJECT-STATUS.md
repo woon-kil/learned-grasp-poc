@@ -13,8 +13,8 @@
 | 항목 | 값 |
 | --- | --- |
 | 단계 | **S0 완료 → G0 준비 대기** |
-| 다음 작업 | 사용자: 보드 고정 → Claude: Jetson 읽기 전용 점검, `P620Camera`, 실기 CLI → G0a 세션 승인 요청 |
-| 차단 요인 | 실기 CLI·`P620Camera` 미구현 |
+| 다음 작업 | 사용자: G0a 높이 탐색 세션 승인 → read 1회, ladder z+60~0 |
+| 차단 요인 | 사용자 승인 대기. G0b부터는 `P620Camera` 필요 |
 | 구성 버전 | `1-draft` (`verified_g0a: false`) |
 | 표 SHA-256 | `16e435468aa86d1b6ca5be536020c581984fa8b9b666b81696282f3e3413a1f5` |
 | 실기 명령 누적 | **0건** |
@@ -39,7 +39,7 @@
 
 | 지표 | 값 |
 | --- | --- |
-| 단위 테스트 | 110 통과 (Fake 장치). 안전장치 변이 시험 17/17 검출은 S0 시점 값 |
+| 단위 테스트 | 140 통과 (Fake 장치). 안전장치 변이 시험 17/17 검출은 S0 시점 값 |
 | G0b / G0c 성공 | 미측정 |
 | 파지 허용 오차 | 미측정 |
 | T1 성공률 | 미측정 |
@@ -58,13 +58,14 @@
 - [x] Gemini 335L 위치 점검: 높이 408 mm, 내림각 62°, 적당 (`docs/261109-1117-카메라-위치-점검.md`)
 - [x] p620 촬영 경로 1회 동작 (`scripts/p620_camera.sh capture`, 팔과 연동하는 `P620Camera`는 미구현)
 - [x] 어두운 영상 원인 규명: 조명이 아니라 노출 수렴 전 프레임. 5초 대기로 수정 (`docs/261109-1120-Gemini-어두운-영상-이슈보고서.md`)
-- [ ] 보드 테이프 고정 (사용자)
+- [x] 흰 보드 고정 (사용자 확인 2026-11-09)
 - [ ] 자동 노출과 고정 노출 비교 (블록·팔이 드나들 때)
 - [ ] 로컬 훅 활성화 `git config core.hooksPath .githooks` (사용자, 선택)
-- [ ] Jetson 점검: Python 버전, `Arm_Lib` `write6` 시그니처, I2C 사용 프로세스 (쓰기 0건)
-- [ ] p620 스냅샷 경로 구현과 `P620Camera` 연결 (현재 `NotImplementedError`)
-- [ ] 실기용 CLI: 승인 파일 → `RemoteArm` → `run_dryrun` / `run_replay`, 관찰자 입력
-- [ ] 실기 전 안전 코드 cross-model 리뷰 (`safety.py`, `arm.py`, `jetson_arm_server.py`, 실기용 CLI)
+- [x] Jetson 점검: Python 3.10, `write6` 시그니처 일치, I2C 점유 없음 (쓰기 0건). SDK가 실패를 print만 하는 것을 발견해 서버에서 실패로 처리
+- [ ] `P620Camera` 연결 (현재 `NotImplementedError`). 드라이버 시작이 느려 상시 구동 방식 필요, G0b 전
+- [x] G0a 실행 도구 `session.py`: read, ladder, observe, dryrun
+- [ ] G0b·G0c 실행 CLI (`run_replay` 연결)
+- [x] 실기 전 안전 코드 cross-model 리뷰: Codex BLOCKING 2 → 0
 - [x] 공개 저장소 구성: 공개 게이트, `safe_push.sh`, CI, ruleset
 
 - [x] 저장소 LICENSE: MIT (사용자 결정 2026-11-09). 관절 수치 JSON은 부여 범위에서 제외
@@ -82,6 +83,14 @@
 | R6 | G0a는 J1 3수준×J5 양끝만 확인한다. 그 사이 값과 오프셋 시험의 중간값은 직접 보지 않는다 | 연속 회전으로 보고 진행, G0b 첫 세션에서 관찰 |
 
 ## Codex 잔여 항목 (BLOCKING 아님)
+
+안전 코드 리뷰 잔여:
+
+- [ ] 최초 park 이동이 시도 기록 시작 전이라 그 이동의 중단은 기록되지 않는다
+- [ ] `observe`가 실행 완료 여부·구성에 연결되지 않고, 실행 기록의 성공은 명령 완료를 뜻한다
+- [ ] 응답이 개행 없이 일부만 오면 `readline` 대기에 제한이 없다
+
+플랜 잔여:
 
 처리 위치는 `docs/G0-RUNBOOK.md` §5다.
 

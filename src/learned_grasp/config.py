@@ -34,6 +34,8 @@ class Motion:
     max_move_deg: int
     first_move_time_ms: int
     grip_time_ms: int
+    settle_ms: int
+    arrival_tol_deg: int
 
 
 @dataclass(frozen=True)

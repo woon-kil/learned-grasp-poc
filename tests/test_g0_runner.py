@@ -198,8 +198,8 @@ def test_dryrun_refuses_to_resume_after_reported_problem(ready_config, table, tm
     assert driver2.writes == []
 
 
-def test_dryrun_reruns_interrupted_combination(ready_config, table, tmp_path):
-    """연결이 끊겨 확인 못 한 조합은 안전 확인이므로 다시 본다."""
+def test_dryrun_refuses_resume_after_interruption(ready_config, table, tmp_path):
+    """이동이 불확실하게 끊겼다. 사람이 확인하기 전에 이어서 움직이지 않는다."""
     sheet = dryrun_sheet(ready_config, table)
     _, arm, ledger = make(ready_config, table, tmp_path)
     calls = []
@@ -212,18 +212,20 @@ def test_dryrun_reruns_interrupted_combination(ready_config, table, tmp_path):
 
     with pytest.raises(ConnectionError):
         run_dryrun(arm, ledger, sheet, crash, table)
-    _, arm2, _ = make(ready_config, table, tmp_path / "again")
-    seen = []
+    driver2, arm2, _ = make(ready_config, table, tmp_path / "again")
+    with pytest.raises(RuntimeError, match="재개하지 않는다"):
+        run_dryrun(arm2, ledger, sheet, lambda t: Outcome(True), table)
+    assert driver2.writes == []
+    assert ledger.state()[0][calls[1]]["outcome"] == "interrupted"
 
-    def ok(trial):
-        seen.append(trial["trial_id"])
-        return Outcome(True)
 
-    run_dryrun(arm2, ledger, sheet, ok, table)
-    assert seen[0] == calls[1] and calls[0] not in seen
-    assert len(seen) == len(sheet) - 1
-    finished, open_ids = ledger.state()
-    assert len(finished) == len(sheet) and not open_ids and all(r["success"] for r in finished.values())
+def test_finished_dryrun_sends_nothing(ready_config, table, tmp_path):
+    sheet = dryrun_sheet(ready_config, table)[:2]
+    _, arm, ledger = make(ready_config, table, tmp_path)
+    run_dryrun(arm, ledger, sheet, lambda t: Outcome(True), table)
+    driver2, arm2, _ = make(ready_config, table, tmp_path / "again")
+    run_dryrun(arm2, ledger, sheet, lambda t: Outcome(True), table)
+    assert driver2.writes == []
 
 
 def test_ledger_rejects_other_configuration(ready_config, table, tmp_path):

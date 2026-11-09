@@ -5,6 +5,8 @@
 | 분류 | 사실 | 출처 (`simple-vision-tech-poc/`) | 이 프로젝트의 취급 |
 | --- | --- | --- | --- |
 | 접속 | Jetson 유선 LAN(주소는 `.env`의 `LG_JETSON_HOST`), I2C `/dev/i2c-7` | `docs/PICK-PLACE-CONTRACT.md` 59행, `docs/261104-2110-PP-1-…` 1527행 | 접속 전 재확인 |
+| Jetson 환경 | Python 3.10.12, 메모리 7.4 GB, `Arm_Lib` 1.0.3 egg, `/dev/i2c-7` 점유 없음 | 2026-11-09 읽기 전용 조회 | 쓰기 없음 |
+| SDK 실패 | `Arm_serial_servo_write6`는 범위 초과와 I2C 예외를 print만 하고 반환한다 | 2026-11-09 설치 소스 AST 확인 | 서버가 출력을 실패로 처리 |
 | 시작 동작 | `arm_driver.py` 51행 생성자가 `Arm_serial_servo_write6(90, 90, 90, 0, 90, 30, 3000)` 수행 | `docs/261104-2110-PP-1-…` 159행 | 실행 금지, 정적 테스트 |
 | SDK 쓰기 | `Arm_serial_servo_write6`는 각도 6개와 시간. id 2·3·4는 내부에서 `180-angle`, id 5는 0–270 | 같은 문서 162–163행 | 시그니처는 Jetson에서 재확인 |
 | SDK 읽기 | 절삭으로 명령과 반환이 다를 수 있다(예 명령 85→반환 86). 반환은 축 실측이 아니다 | `docs/261108-1116-…` 44행 | 조회값을 목표로 쓰지 않음 |

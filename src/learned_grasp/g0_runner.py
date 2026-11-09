@@ -166,18 +166,17 @@ def _bind(arm: SafeArm, ledger: AttemptLedger, table: PoseTable) -> None:
 def run_dryrun(arm: SafeArm, ledger: AttemptLedger, sheet: list[dict], observer: Observer, table: PoseTable) -> None:
     """빈 그리퍼 드라이런. 관찰자가 이상을 보고하면 즉시 끝낸다."""
     _bind(arm, ledger, table)
+    ledger.close_interrupted()
     finished, _ = ledger.state()
     stopped = sorted(trial_id for trial_id, record in finished.items() if not record["success"])
     if stopped:
-        raise RuntimeError(f"이상이 보고된 드라이런은 재개하지 않는다. 표를 고쳐 구성 버전을 올린다: {stopped}")
-    ledger.close_interrupted()
-    finished, _ = ledger.state()
-    finished = {trial_id: record for trial_id, record in finished.items() if record["success"]}
+        raise RuntimeError(f"이상 보고나 중단이 있는 드라이런은 재개하지 않는다. 팔을 확인하고 새 기록으로 시작한다: {stopped}")
+    remaining = [trial for trial in sheet if trial["trial_id"] not in finished]
+    if not remaining:
+        return
     arm.goto(PARK_POSE)
     arm.set_grip("open")
-    for trial in sheet:
-        if trial["trial_id"] in finished:
-            continue
+    for trial in remaining:
         ledger.start(trial, joints_hover=arm.gate.joints(_pose(HOVER, trial)), joints_grasp=arm.gate.joints(_pose(GRASP, trial)))
         arm.goto(_pose(HOVER, trial))
         arm.goto(_pose(GRASP, trial))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import select
 import subprocess
 import time
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from learned_grasp.safety import PARK_POSE, Pose, SafetyGate, SafetyViolation
 
 class ArmDriver(Protocol):
     def write6(self, q5: tuple[int, ...], grip: int, time_ms: int) -> None: ...
+    def write_grip(self, grip: int, time_ms: int) -> None: ...
     def read(self) -> dict: ...
     def close(self) -> None: ...
 
@@ -56,10 +58,17 @@ def load_approval(path: Path, config: Config, now: datetime | None = None) -> Se
 class SafeArm:
     """게이트 통과 후에만 쓰기를 보낸다. 조회값을 목표로 쓰지 않는다."""
 
-    def __init__(self, driver: ArmDriver, gate: SafetyGate, sleep: Callable[[float], None] = time.sleep):
+    def __init__(
+        self,
+        driver: ArmDriver,
+        gate: SafetyGate,
+        sleep: Callable[[float], None] = time.sleep,
+        start_joints: tuple[int, ...] | None = None,
+    ):
         self.driver = driver
         self.gate = gate
         self.sleep = sleep
+        self.start_joints = start_joints
         self.pose: Pose | None = None
         self.grip: int = gate.config.open_sdk
         self.holding = False
@@ -67,18 +76,34 @@ class SafeArm:
     def goto(self, target: Pose) -> None:
         self.gate.check_transition(self.pose, target)
         q5 = self.gate.joints(target)
-        time_ms = self.gate.move_time_ms(self.pose, target)
+        time_ms = self.gate.move_time_ms(self.pose, target, self.start_joints)
         self.driver.write6(q5, self.grip, time_ms)
-        self.sleep(time_ms / 1000.0)
+        self.sleep((time_ms + self.gate.config.motion.settle_ms) / 1000.0)
+        self._check_arrival(q5)
         self.pose = target
+
+    def _check_arrival(self, q5: tuple[int, ...]) -> None:
+        """시간이 지났다고 도착으로 보지 않는다. SDK 반환을 비교하고 어긋나면 다음 쓰기를 막는다.
+
+        반환은 축 실측이 아니며 비교에만 쓴다. 목표로 재사용하지 않는다.
+        """
+        reading = self.driver.read()
+        if any(item != "sdk_return" for item in reading.get("status", [])):
+            raise SafetyViolation(f"도착 확인 조회 실패: {reading}")
+        values = reading.get("values")
+        tolerance = self.gate.config.motion.arrival_tol_deg
+        if not values or any(abs(value - goal) > tolerance for value, goal in zip(values[:5], q5)):
+            raise SafetyViolation(f"목표 미도달로 멈춘다. 목표 {q5}, SDK 반환 {values}. 감독자가 팔 상태를 확인한다")
 
     def set_grip(self, action: str) -> None:
         grip = self.gate.check_grip(self.pose, action, self.holding)
         if self.pose is None:
             raise SafetyViolation("자세를 모르는 상태에서 그리퍼를 움직이지 않는다")
-        time_ms = self.gate.config.motion.grip_time_ms
-        self.driver.write6(self.gate.joints(self.pose), grip, time_ms)
-        self.sleep(time_ms / 1000.0)
+        if grip != self.grip:
+            # 팔 5축을 더 짧은 시간으로 재전송하지 않도록 6번 서보만 쓴다.
+            time_ms = self.gate.config.motion.grip_time_ms
+            self.driver.write_grip(grip, time_ms)
+            self.sleep((time_ms + self.gate.config.motion.settle_ms) / 1000.0)
         self.grip = grip
         self.holding = action == "close"
 
@@ -95,6 +120,9 @@ class FakeArm:
 
     def write6(self, q5, grip, time_ms):
         self.writes.append((tuple(q5), grip, time_ms))
+
+    def write_grip(self, grip, time_ms):
+        self.writes.append((self.writes[-1][0], grip, time_ms))
 
     def read(self):
         return {"values": list(self.writes[-1][0]) + [self.writes[-1][1]] if self.writes else None}
@@ -123,9 +151,13 @@ class RemoteArm:
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self._call({"op": "hello", "token": approval.token})
 
-    def _call(self, request: dict) -> dict:
+    def _call(self, request: dict, timeout_s: float = 10.0) -> dict:
         self.process.stdin.write(json.dumps(request) + "\n")
         self.process.stdin.flush()
+        ready, _, _ = select.select([self.process.stdout], [], [], timeout_s)
+        if not ready:
+            self.process.kill()
+            raise ConnectionError(f"Jetson 서버가 {timeout_s:g}초 안에 응답하지 않았다. 이미 보낸 이동은 멈추지 않으니 감독자가 확인한다")
         line = self.process.stdout.readline()
         if not line:
             raise ConnectionError("Jetson 서버 연결이 끊겼다")
@@ -137,15 +169,28 @@ class RemoteArm:
     def write6(self, q5, grip, time_ms):
         self._call({"op": "write6", "q": [*q5, grip], "time_ms": time_ms})
 
+    def write_grip(self, grip, time_ms):
+        self._call({"op": "grip", "angle": grip, "time_ms": time_ms})
+
     def read(self):
         return self._call({"op": "read"})
 
     def close(self):
+        """정리 실패가 원래 오류를 가리지 않게 한다."""
         try:
-            self._call({"op": "bye"})
+            if self.process.poll() is None:
+                self._call({"op": "bye"}, timeout_s=3.0)
+        except (OSError, ValueError, RuntimeError):
+            pass
         finally:
-            self.process.stdin.close()
-            self.process.wait(timeout=5)
+            try:
+                self.process.stdin.close()
+            except OSError:
+                pass
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
 
 
 __all__ = ["ApprovalError", "ArmDriver", "FakeArm", "PARK_POSE", "RemoteArm", "SafeArm", "SessionApproval", "load_approval"]
