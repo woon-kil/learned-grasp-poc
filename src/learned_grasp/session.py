@@ -209,7 +209,7 @@ def _driver(approval: SessionApproval, used: int) -> RemoteArm:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park"])
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
     parser.add_argument("--session", type=Path, required=True)
@@ -242,7 +242,7 @@ def main() -> None:
         (folder / "block_ready").write_text("1")
         print("물체 적재 확인을 기록했다")
         return
-    if args.command in ("ladder", "dryrun", "replay", "descend") and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park") and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command == "ladder":
         require_previous_observation(folder, args.z_offset)
@@ -257,6 +257,8 @@ def main() -> None:
         arm = SafeArm(CountingDriver(driver, counter, approval.max_writes), SafetyGate(config, table), start_joints=start)
         if args.command == "descend":
             descend_and_stop(arm, config, table)
+        elif args.command == "park":
+            arm.goto(PARK_POSE)
         elif args.command == "replay":
             camera = P620Camera(f"runs/{approval.session_id}/frames")
             try:
