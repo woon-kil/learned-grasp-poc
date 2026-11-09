@@ -25,6 +25,7 @@ from learned_grasp.session import (
     ladder_config,
     read_start_joints,
     record_observation,
+    require_site_folder,
     require_previous_observation,
     run_ladder,
 )
@@ -345,6 +346,34 @@ def test_close_check_closes_and_opens_at_grasp_only(ready_config):
     assert q[2] == q[3] == q[4] and q[1] == q[5] and q[0] == q[6] == ready_config.park
     assert grips == [ready_config.open_sdk] * 3 + [ready_config.close_sdk] + [ready_config.open_sdk] * 3
     assert [entry for entry in seen if entry[1] == 123.0] == [(4, 123.0)]
+
+
+def test_close_check_uses_given_position(ready_config):
+    table = generate(ready_config.table)
+    fake = FakeArm()
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    run_close_check(arm, ready_config, table, 0.0, 2)
+    assert len(fake.writes) == 7
+    assert fake.writes[2][0] == (90, *table.entries[2].grasp, 90)
+    assert fake.writes[3][1] == ready_config.close_sdk
+
+
+@pytest.mark.parametrize("r_index", [-1, 10])
+def test_close_check_rejects_position_out_of_table(ready_config, r_index):
+    table = generate(ready_config.table)
+    fake = FakeArm()
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    with pytest.raises(SafetyViolation):
+        run_close_check(arm, ready_config, table, 0.0, r_index)
+    assert fake.writes == []
+
+
+def test_site_folder_must_match_position(tmp_path):
+    require_site_folder(tmp_path / "G0b-5-r2", 2)
+    with pytest.raises(SafetyViolation):
+        require_site_folder(tmp_path / "G0b-5-r2", 0)
+    with pytest.raises(SafetyViolation):
+        require_site_folder(tmp_path / "G0b-5", 2)
 
 
 def test_counting_driver_counts_grip_writes(tmp_path):

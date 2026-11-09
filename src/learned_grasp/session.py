@@ -278,9 +278,19 @@ def run_carry_test(
     )
 
 
-def run_close_check(arm: SafeArm, config: Config, table: PoseTable, hold_s: float) -> None:
+def require_site_folder(folder: Path, r_index: int) -> None:
+    """관찰 기록에 위치가 없으므로 위치마다 폴더를 따로 두어 앞 단계 관찰이 섞이지 않게 한다."""
+    if not folder.name.endswith(f"-r{r_index}"):
+        raise SafetyViolation(f"--r-index {r_index}는 이름이 -r{r_index}로 끝나는 세션 폴더에서만 쓴다: {folder.name}")
+
+
+def run_close_check(arm: SafeArm, config: Config, table: PoseTable, hold_s: float, r_index: int | None = None) -> None:
     """빈 손으로 닫아 머문 뒤 연다. 닫은 손끝과 작업대의 간격은 사람이 읽는다."""
     trial = fit_trial(config, table)
+    if r_index is not None:
+        if not 0 <= r_index < len(table.entries):
+            raise SafetyViolation(f"--r-index {r_index}는 표 범위 밖이다")
+        trial = {**trial, "r_index": r_index}
     hover = Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"])
     grasp = Pose(GRASP, trial["r_index"], trial["j1"], trial["j5"])
     arm.goto(PARK_POSE)
@@ -326,6 +336,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check"])
     parser.add_argument("--attempt", type=int)
+    parser.add_argument("--r-index", type=int)
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
     parser.add_argument("--session", type=Path, required=True)
@@ -359,6 +370,10 @@ def main() -> None:
         (folder / "block_ready").write_text("1")
         print("물체 적재 확인을 기록했다")
         return
+    if args.r_index is not None:
+        if args.command != "close-check":
+            raise SystemExit("--r-index는 close-check에서만 쓴다")
+        require_site_folder(folder, args.r_index)
     if args.command == "carry-test" and args.attempt is None:
         raise SystemExit("--attempt가 필요하다")
     if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check") and not args.start_confirmed:
@@ -384,7 +399,7 @@ def main() -> None:
         elif args.command == "carry-test":
             run_carry_test(arm, AttemptLedger(folder / "carry.jsonl"), config, table, loader, min(args.hold_sec, 60.0), args.attempt)
         elif args.command == "close-check":
-            run_close_check(arm, config, table, min(args.hold_sec, 60.0))
+            run_close_check(arm, config, table, min(args.hold_sec, 60.0), args.r_index)
         elif args.command == "descend":
             descend_and_stop(arm, config, table)
         elif args.command == "park":
