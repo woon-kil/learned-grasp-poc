@@ -1,7 +1,7 @@
 # 구성 초안. 값은 설계 후보이고 실측이 아니다.
 # verified_g0a 가 false 인 동안 실장치 실행은 G0a 세션만 허용된다.
 config_version: "4"
-verified_g0a: false
+verified_g0a: true
 
 table:
   # 블록을 작업대에 바로 놓는 구성. 모델 값이다.
