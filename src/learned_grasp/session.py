@@ -178,8 +178,9 @@ def make_block_loader(arm: SafeArm, ready_path: Path, wait_s: float = 300.0, sle
     return load
 
 
-# 블록을 놓고 손끝이 옆면에 얼마나 걸리는지 위에서부터 본다. 모델 TCP 높이다.
-FIT_Z_MM = (17.5, 12.5, 7.5)
+# 닫으면 손끝이 약 16~20 mm 돌출하므로 높은 곳부터 닫아 본다. 모델 TCP 높이다.
+# 17.5 mm에서 닫은 손끝은 작업대 위 약 2~6 mm로 추정된다. 그보다 낮게 닫지 않는다.
+FIT_Z_MM = (27.5, 22.5, 17.5)
 
 
 def fit_config(config: Config, z_mm: float) -> Config:

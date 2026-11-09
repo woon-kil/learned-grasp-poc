@@ -198,7 +198,7 @@ def test_fit_rejects_other_height(ready_config):
 
 
 def test_grip_test_closes_lifts_and_opens_low(ready_config):
-    config, table, fake, arm = _fit_setup(ready_config, 12.5)
+    config, table, fake, arm = _fit_setup(ready_config, 27.5)
 
     def load(trial):
         arm.goto(Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"]))
