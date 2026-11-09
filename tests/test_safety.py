@@ -164,7 +164,7 @@ def test_approval_valid(tmp_path, draft_config):
 )
 def test_approval_rejected(tmp_path, draft_config, overrides):
     with pytest.raises(ApprovalError):
-        load_approval(_approval(tmp_path, **overrides), draft_config)
+        load_approval(_approval(tmp_path, **overrides), replace(draft_config, verified_g0a=False))
 
 
 def test_example_session_file_is_not_approved(draft_config):

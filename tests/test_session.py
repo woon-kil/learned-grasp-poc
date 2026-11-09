@@ -6,12 +6,16 @@ from learned_grasp.arm import FakeArm, SafeArm
 from learned_grasp.attempts import AttemptLedger
 from learned_grasp.kinematics import fk_batch
 from learned_grasp.pose_table import generate
-from learned_grasp.safety import PARK_POSE, SafetyGate, SafetyViolation
+from learned_grasp.safety import HOVER, PARK_POSE, Pose, SafetyGate, SafetyViolation
 from learned_grasp.session import (
     LADDER_OFFSETS_MM,
     CountingDriver,
+    FIT_Z_MM,
     NeedHuman,
     descend_and_stop,
+    fit_config,
+    run_fit,
+    run_grip_test,
     make_block_loader,
     make_pick_observer,
     ladder_config,
@@ -163,6 +167,48 @@ def test_descend_stops_low_without_returning(ready_config):
     descend_and_stop(arm, ready_config, table)
     assert len(fake.writes) == 3 and arm.pose.kind == "grasp"
     assert fake.writes[-1][0][0] == 90 and {g for _, g, _ in fake.writes} == {ready_config.open_sdk}
+
+
+def _fit_setup(ready_config, z):
+    config = fit_config(ready_config, z)
+    table = generate(config.table)
+    fake = FakeArm()
+    return config, table, fake, SafeArm(fake, SafetyGate(config, table), sleep=lambda _: None)
+
+
+@pytest.mark.parametrize("z", FIT_Z_MM)
+def test_fit_never_closes_and_returns(ready_config, z):
+    config, table, fake, arm = _fit_setup(ready_config, z)
+    loaded = []
+
+    def load(trial):
+        arm.goto(Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"]))
+        loaded.append(fake.writes[-1][0])
+
+    run_fit(arm, config, table, load, 0.0)
+    assert {g for _, g, _ in fake.writes} == {config.open_sdk}
+    assert len(fake.writes) == 5 and arm.pose.kind == "park" and len(loaded) == 1
+    grasp = fake.writes[2][0]
+    assert fk_batch(np.array([grasp]))[0][0, 2] == pytest.approx(z, abs=config.table.z_tol_mm + 1e-6)
+
+
+def test_fit_rejects_other_height(ready_config):
+    with pytest.raises(SafetyViolation):
+        fit_config(ready_config, 0.0)
+
+
+def test_grip_test_closes_lifts_and_opens_low(ready_config):
+    config, table, fake, arm = _fit_setup(ready_config, 12.5)
+
+    def load(trial):
+        arm.goto(Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"]))
+
+    run_grip_test(arm, config, table, load, 0.0)
+    grips = [g for _, g, _ in fake.writes]
+    assert config.close_sdk in grips and grips[-1] == config.open_sdk and not arm.holding
+    assert len(fake.writes) == 9 and arm.pose.kind == "park"
+    opened_at = next(i for i, (_, g, _) in enumerate(fake.writes) if i > 2 and g == config.open_sdk)
+    assert fake.writes[opened_at][0] == fake.writes[opened_at - 1][0] != config.park
 
 
 def test_counting_driver_counts_grip_writes(tmp_path):

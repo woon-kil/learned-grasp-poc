@@ -178,6 +178,53 @@ def make_block_loader(arm: SafeArm, ready_path: Path, wait_s: float = 300.0, sle
     return load
 
 
+# 블록을 놓고 손끝이 옆면에 얼마나 걸리는지 위에서부터 본다. 모델 TCP 높이다.
+FIT_Z_MM = (17.5, 12.5, 7.5)
+
+
+def fit_config(config: Config, z_mm: float) -> Config:
+    if z_mm not in FIT_Z_MM:
+        raise SafetyViolation(f"--z-mm는 {FIT_Z_MM} 중 하나다")
+    return ladder_config(config, z_mm - config.table.z_grasp_mm)
+
+
+def fit_trial(config: Config, table: PoseTable) -> dict:
+    return {
+        "trial_id": f"fit-{config.config_version}",
+        "r_index": table.nearest_index(140.0),
+        "j1": sum(config.j1_range) // 2,
+        "j5": sum(config.j5_range) // 2,
+    }
+
+
+def run_fit(arm: SafeArm, config: Config, table: PoseTable, load_block, hold_s: float) -> None:
+    """닫지 않는다. 대기 자세에서 물체 확인을 받고 내려가 머문 뒤 돌아온다."""
+    trial = fit_trial(config, table)
+    arm.goto(PARK_POSE)
+    load_block(trial)
+    arm.goto(Pose(GRASP, trial["r_index"], trial["j1"], trial["j5"]))
+    arm.sleep(hold_s)
+    arm.goto(Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"]))
+    arm.goto(PARK_POSE)
+
+
+def run_grip_test(arm: SafeArm, config: Config, table: PoseTable, load_block, hold_s: float) -> None:
+    """집어 들어 머문 뒤 같은 자리에 내려놓고 연다. park로 들고 가지 않는다."""
+    trial = fit_trial(config, table)
+    hover = Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"])
+    grasp = Pose(GRASP, trial["r_index"], trial["j1"], trial["j5"])
+    arm.goto(PARK_POSE)
+    load_block(trial)
+    arm.goto(grasp)
+    arm.set_grip("close")
+    arm.goto(hover)
+    arm.sleep(hold_s)
+    arm.goto(grasp)
+    arm.set_grip("open")
+    arm.goto(hover)
+    arm.goto(PARK_POSE)
+
+
 def descend_and_stop(arm: SafeArm, config: Config, table: PoseTable) -> None:
     """전원 차단 거동 확인용. 낮은 자세까지 간 뒤 복귀하지 않고 끝난다. 서보가 그 자세를 유지한다."""
     trial = ladder_sheet(config, table)[2]
@@ -209,7 +256,7 @@ def _driver(approval: SessionApproval, used: int) -> RemoteArm:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test"])
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
     parser.add_argument("--session", type=Path, required=True)
@@ -217,6 +264,7 @@ def main() -> None:
     parser.add_argument("--z-offset", type=float)
     parser.add_argument("--start-confirmed", action="store_true", help="사용자가 빈 그리퍼, 시작 자세, park 경로를 확인했다")
     parser.add_argument("--hold-sec", type=float, default=0.0)
+    parser.add_argument("--z-mm", type=float)
     parser.add_argument("--ok", action="store_true")
     parser.add_argument("--note", default="")
     args = parser.parse_args()
@@ -242,11 +290,13 @@ def main() -> None:
         (folder / "block_ready").write_text("1")
         print("물체 적재 확인을 기록했다")
         return
-    if args.command in ("ladder", "dryrun", "replay", "descend", "park") and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test") and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command == "ladder":
         require_previous_observation(folder, args.z_offset)
         config = ladder_config(config, args.z_offset)
+    if args.command in ("fit", "grip-test"):
+        config = fit_config(config, args.z_mm)
     table = generate(config.table)
     driver = _driver(approval, used)
     try:
@@ -255,7 +305,12 @@ def main() -> None:
             return
         start = read_start_joints(driver, folder)
         arm = SafeArm(CountingDriver(driver, counter, approval.max_writes), SafetyGate(config, table), start_joints=start)
-        if args.command == "descend":
+        loader = make_block_loader(arm, folder / "block_ready")
+        if args.command == "fit":
+            run_fit(arm, config, table, loader, min(args.hold_sec, 60.0))
+        elif args.command == "grip-test":
+            run_grip_test(arm, config, table, loader, min(args.hold_sec, 60.0))
+        elif args.command == "descend":
             descend_and_stop(arm, config, table)
         elif args.command == "park":
             arm.goto(PARK_POSE)
