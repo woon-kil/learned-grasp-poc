@@ -5,10 +5,12 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import yaml
 
 from learned_grasp.arm import ApprovalError, FakeArm, SafeArm, load_approval
-from learned_grasp.config import ConfigError
+from learned_grasp.config import MIN_Z_GRASP_MM, ROOT, ConfigError, parse_config
 from learned_grasp.safety import GRASP, HOVER, PARK_POSE, Pose, SafetyGate, SafetyViolation
+from learned_grasp.session import fit_config
 
 
 @pytest.fixture
@@ -33,6 +35,24 @@ def grasp(index=0, j1=90, j5=90):
 def test_config_without_motion_values_cannot_build_gate(draft_config, table, missing):
     with pytest.raises(ConfigError):
         SafetyGate(replace(draft_config, **{missing: None}), table)
+
+
+def test_grasp_height_floor_accepts_boundary(draft_config):
+    assert replace(draft_config.table, z_grasp_mm=MIN_Z_GRASP_MM).z_grasp_mm == 17.5
+    assert fit_config(draft_config, 17.5).table.z_grasp_mm == 17.5
+
+
+@pytest.mark.parametrize("z", [17.4, 12.5, float("nan"), float("inf")])
+def test_grasp_height_floor_rejects_replace(draft_config, z):
+    with pytest.raises(ConfigError):
+        replace(draft_config.table, z_grasp_mm=z)
+
+
+def test_grasp_height_floor_rejects_config_file():
+    raw = yaml.safe_load((ROOT / "config" / "workspace.yaml").read_text(encoding="utf-8"))
+    raw["table"]["z_grasp_mm"] = 12.5
+    with pytest.raises(ConfigError):
+        parse_config(raw)
 
 
 def test_first_move_must_be_park(arm, driver):

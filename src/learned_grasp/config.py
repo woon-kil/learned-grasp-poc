@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +10,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CHAIN_PATH = ROOT / "assets" / "kinematic_chain.json"
+
+# 닫으면 손끝이 약 16~20 mm 돌출하는 그리퍼 구조 때문에 그 아래 높이를 막는다. 모델 TCP 명목값이다.
+# 이 높이에서 닫아도 된다는 보증이 아니다. 17.5 mm 닫기는 시험하지 않았다.
+MIN_Z_GRASP_MM = 17.5
 
 
 class ConfigError(ValueError):
@@ -25,6 +30,10 @@ class TableSpec:
     r_max_mm: float
     r_step_mm: float
     hover_lift_mm: float
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.z_grasp_mm) or self.z_grasp_mm < MIN_Z_GRASP_MM:
+            raise ConfigError(f"z_grasp_mm {self.z_grasp_mm}는 하한 {MIN_Z_GRASP_MM} mm 미만이거나 유한값이 아니다")
 
 
 @dataclass(frozen=True)
