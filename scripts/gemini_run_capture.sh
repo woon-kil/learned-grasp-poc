@@ -49,4 +49,8 @@ if [ "${ready}" -ne 1 ]; then
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-python3 "${HERE}/gemini_capture.py" "${LOG}" "${OUT}" "${LG_REPEAT:-1}" "${LG_INTERVAL_SEC:-0}"
+if [ -n "${LG_PROBE_SEC:-}" ]; then
+  PYTHONPATH="${HERE}:${PYTHONPATH:-}" python3 "${HERE}/gemini_probe.py" "${LOG}" "${OUT}" "${LG_PROBE_SEC}"
+else
+  python3 "${HERE}/gemini_capture.py" "${LOG}" "${OUT}" "${LG_REPEAT:-1}" "${LG_INTERVAL_SEC:-0}"
+fi

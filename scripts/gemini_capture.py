@@ -278,6 +278,10 @@ def main():
     node = Grab()
     after = None
     try:
+        # 드라이버 시작 직후 프레임은 자동 노출이 수렴하기 전이라 어둡다. 실측으로 4초 뒤 안정됐다.
+        settle_end = time.monotonic() + float(os.environ.get("LG_SETTLE_SEC", "5"))
+        while time.monotonic() < settle_end:
+            rclpy.spin_once(node, timeout_sec=0.2)
         for index in range(1, repeat + 1):
             if index > 1 and interval > 0:
                 end = time.monotonic() + interval

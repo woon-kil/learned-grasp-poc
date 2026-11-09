@@ -160,6 +160,7 @@ case "${cmd}" in
       -e LG_CONTAINER="${NAME}" \
       -e LG_USB_NODE="${node}" \
       -e LG_PROJECT_ROOT="${ROOT}" \
+      -e LG_PROBE_SEC="${LG_PROBE_SEC:-}" \
       -e HOME=/tmp \
       -w "${WS}" \
       "${NAME}" \
