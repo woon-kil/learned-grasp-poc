@@ -1,16 +1,16 @@
 # 구성 초안. 값은 설계 후보이고 실측이 아니다.
 # verified_g0a 가 false 인 동안 실장치 실행은 G0a 세션만 허용된다.
-config_version: "1-draft"
+config_version: "2-draft"
 verified_g0a: false
 
 table:
-  # 블록을 작업대에 바로 놓는 구성. base_link z=0을 작업대로 가정한 모델 값이다.
-  # 핀치 높이 15 mm - 모델 TCP 앞선 거리 42.93 mm. 실제 높이는 G0a에서 위에서부터 내려가 정한다.
-  z_grasp_mm: -27.5
+  # 블록을 작업대에 바로 놓는 구성. 모델 값이다.
+  # G0a-1 관찰: 모델 TCP 13.5 mm에서 손끝이 바닥 근처. 그보다 4 mm 위를 후보로 둔다.
+  z_grasp_mm: 17.5
   tilt_deg: 5.0
   tilt_tol_deg: 5.0
   z_tol_mm: 1.0
-  r_min_mm: 110.0
+  r_min_mm: 120.0  # 베이스 아래 투명 판과 여유를 둔다
   r_max_mm: 165.0
   r_step_mm: 5.0
   hover_lift_mm: 40.0

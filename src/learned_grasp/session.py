@@ -2,8 +2,8 @@
 
 사용:
   python -m learned_grasp.session read    --session runs/G0a-1/approval.json
-  python -m learned_grasp.session ladder  --session runs/G0a-1/approval.json --z-offset 60 --start-confirmed
-  python -m learned_grasp.session observe --session runs/G0a-1/approval.json --z-offset 60 --ok --note "간격 충분"
+  python -m learned_grasp.session ladder  --session runs/G0a-2/approval.json --z-offset 15 --start-confirmed
+  python -m learned_grasp.session observe --session runs/G0a-2/approval.json --z-offset 15 --ok --note "간격 충분"
   python -m learned_grasp.session dryrun  --session runs/G0a-1/approval.json --start-confirmed
 
 대화형 입력이 없다. 감독자는 전원 차단으로 멈춘다. --start-confirmed는 사용자가 빈 그리퍼, 시작 자세,
@@ -26,8 +26,8 @@ from learned_grasp.g0_runner import Outcome, dryrun_sheet, run_dryrun
 from learned_grasp.pose_table import PoseTable, generate
 from learned_grasp.safety import SafetyGate, SafetyViolation
 
-# 베이스 바닥 = 작업대 가정이 미검증이라 가정 높이보다 위에서 시작해 내려온다.
-LADDER_OFFSETS_MM = (60, 40, 25, 15, 8, 4, 0)
+# 구성 높이보다 위에서 시작해 내려온다. G0a-1은 중앙 한 곳만 확인했으므로 위치별 차이를 본다.
+LADDER_OFFSETS_MM = (15, 5, 0)
 
 
 class CountingDriver:
@@ -79,14 +79,17 @@ def ladder_config(config: Config, offset_mm: float) -> Config:
 
 
 def ladder_sheet(config: Config, table: PoseTable) -> list[dict]:
-    """표 중앙 반경, J1·J5 범위 중앙 한 자세만 내려간다."""
+    """표의 양끝·중앙 반경과 J1 양끝을 내려간다. 작업 영역 모서리의 높이 차이를 보기 위해서다."""
+    last = len(table.entries) - 1
     return [
         {
-            "trial_id": f"ladder-{config.config_version}",
-            "r_index": len(table.entries) // 2,
-            "j1": sum(config.j1_range) // 2,
+            "trial_id": f"ladder-{config.config_version}-r{r_index}-j{j1}",
+            "r_index": r_index,
+            "j1": j1,
             "j5": sum(config.j5_range) // 2,
         }
+        for r_index in (0, last // 2, last)
+        for j1 in config.j1_range
     ]
 
 
