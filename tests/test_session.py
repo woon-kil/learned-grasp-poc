@@ -11,6 +11,7 @@ from learned_grasp.session import (
     LADDER_OFFSETS_MM,
     CountingDriver,
     NeedHuman,
+    descend_and_stop,
     make_block_loader,
     make_pick_observer,
     ladder_config,
@@ -153,6 +154,15 @@ def test_block_loader_ignores_stale_ready_and_times_out(ready_config, tmp_path):
     ticks = iter([0.0, 400.0])
     with pytest.raises(NeedHuman):
         make_block_loader(arm, ready, wait_s=300.0, sleep=lambda _: None, clock=lambda: next(ticks), log=lambda *a, **k: None)(TRIAL)
+
+
+def test_descend_stops_low_without_returning(ready_config):
+    table = generate(ready_config.table)
+    fake = FakeArm()
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    descend_and_stop(arm, ready_config, table)
+    assert len(fake.writes) == 3 and arm.pose.kind == "grasp"
+    assert fake.writes[-1][0][0] == 90 and {g for _, g, _ in fake.writes} == {ready_config.open_sdk}
 
 
 def test_counting_driver_counts_grip_writes(tmp_path):

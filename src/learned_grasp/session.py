@@ -27,7 +27,7 @@ from learned_grasp.camera import P620Camera
 from learned_grasp.config import Config, load_config
 from learned_grasp.g0_runner import Outcome, dryrun_sheet, run_dryrun, run_replay
 from learned_grasp.pose_table import PoseTable, generate
-from learned_grasp.safety import HOVER, Pose, SafetyGate, SafetyViolation
+from learned_grasp.safety import GRASP, HOVER, PARK_POSE, Pose, SafetyGate, SafetyViolation
 
 # 구성 높이보다 위에서 시작해 내려온다. G0a-1은 중앙 한 곳만 확인했으므로 위치별 차이를 본다.
 LADDER_OFFSETS_MM = (15, 5, 0)
@@ -178,6 +178,15 @@ def make_block_loader(arm: SafeArm, ready_path: Path, wait_s: float = 300.0, sle
     return load
 
 
+def descend_and_stop(arm: SafeArm, config: Config, table: PoseTable) -> None:
+    """전원 차단 거동 확인용. 낮은 자세까지 간 뒤 복귀하지 않고 끝난다. 서보가 그 자세를 유지한다."""
+    trial = ladder_sheet(config, table)[2]
+    trial = {**trial, "j1": sum(config.j1_range) // 2}
+    arm.goto(PARK_POSE)
+    arm.goto(Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"]))
+    arm.goto(Pose(GRASP, trial["r_index"], trial["j1"], trial["j5"]))
+
+
 def _unobserved(trial: dict) -> Outcome:
     """프로그램은 무간섭을 판정하지 못한다. 이 성공은 명령 완료이고 관찰은 세션 문서에 따로 남긴다."""
     return Outcome(True, "명령 완료, 관찰은 세션 문서")
@@ -200,7 +209,7 @@ def _driver(approval: SessionApproval, used: int) -> RemoteArm:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend"])
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
     parser.add_argument("--session", type=Path, required=True)
@@ -233,7 +242,7 @@ def main() -> None:
         (folder / "block_ready").write_text("1")
         print("물체 적재 확인을 기록했다")
         return
-    if args.command in ("ladder", "dryrun", "replay") and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend") and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command == "ladder":
         require_previous_observation(folder, args.z_offset)
@@ -246,7 +255,9 @@ def main() -> None:
             return
         start = read_start_joints(driver, folder)
         arm = SafeArm(CountingDriver(driver, counter, approval.max_writes), SafetyGate(config, table), start_joints=start)
-        if args.command == "replay":
+        if args.command == "descend":
+            descend_and_stop(arm, config, table)
+        elif args.command == "replay":
             camera = P620Camera(f"runs/{approval.session_id}/frames")
             try:
                 sheet = json.loads(args.sheet.read_text(encoding="utf-8"))
