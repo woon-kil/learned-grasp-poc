@@ -28,3 +28,7 @@ uv run pytest -q   # 장치 없이 실행된다
 ```
 
 실기 실행 절차는 [G0-RUNBOOK](docs/G0-RUNBOOK.md)이고, 사용자 승인과 전원 차단 담당자가 필요하다.
+
+## 라이선스
+
+[MIT](LICENSE). 단 `assets/kinematic_chain.json`의 관절 수치는 제조사 로봇 모델에서 추출한 값이라 이 라이선스로 권리를 부여하지 않는다. Yahboom과 관계없는 개인 프로젝트다.

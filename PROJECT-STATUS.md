@@ -63,8 +63,7 @@
 - [ ] 실기 전 안전 코드 cross-model 리뷰 (`safety.py`, `arm.py`, `jetson_arm_server.py`, 실기용 CLI)
 - [x] 공개 저장소 구성: 공개 게이트, `safe_push.sh`, CI, ruleset
 
-### 사용자 결정 대기
-- [ ] 저장소 LICENSE. 없으면 코드 열람만 가능하고 재사용 권한은 없다
+- [x] 저장소 LICENSE: MIT (사용자 결정 2026-11-09). 관절 수치 JSON은 부여 범위에서 제외
 
 ## 미해결 위험
 

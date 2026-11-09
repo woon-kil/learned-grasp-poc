@@ -3,6 +3,8 @@ name = "learned-grasp-poc"
 version = "0.1.0"
 description = "DOFBOT Pro 자기 지도 파지 학습 PoC"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = ["numpy>=1.26", "pyyaml>=6"]
 
 [dependency-groups]
