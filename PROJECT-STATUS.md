@@ -13,8 +13,8 @@
 | 항목 | 값 |
 | --- | --- |
 | 단계 | **S0 완료 → G0 준비 대기** |
-| 다음 작업 | 사용자: Gemini 고정 → Claude: Jetson 읽기 전용 점검, 스냅샷 경로, 실기 CLI → G0a 세션 승인 요청 |
-| 차단 요인 | 실기 CLI·스냅샷 경로 미구현, Gemini 고정 대기 |
+| 다음 작업 | 사용자: 조명, 보드 고정, 노란 블록 재촬영 → Claude: Jetson 읽기 전용 점검, `P620Camera`, 실기 CLI → G0a 세션 승인 요청 |
+| 차단 요인 | 조명 부족, 실기 CLI·`P620Camera` 미구현 |
 | 구성 버전 | `1-draft` (`verified_g0a: false`) |
 | 표 SHA-256 | `16e435468aa86d1b6ca5be536020c581984fa8b9b666b81696282f3e3413a1f5` |
 | 실기 명령 누적 | **0건** |
@@ -55,7 +55,9 @@
 
 ### G0 전 작업 (장치 불필요 또는 읽기 전용)
 - [x] 물체·감독·카메라 위치 답변 반영 (`docs/261109-1049-물체-카메라-구성-결정.md`)
-- [ ] Gemini 335L 권고 위치에 고정, 네 모서리 사진 (사용자)
+- [x] Gemini 335L 위치 점검: 높이 408 mm, 내림각 62°, 적당 (`docs/261109-1117-카메라-위치-점검.md`)
+- [x] p620 촬영 경로 1회 동작 (`scripts/p620_camera.sh capture`, 팔과 연동하는 `P620Camera`는 미구현)
+- [ ] 조명 추가, 보드 테이프 고정, 노란 블록 재촬영 (사용자)
 - [ ] 로컬 훅 활성화 `git config core.hooksPath .githooks` (사용자, 선택)
 - [ ] Jetson 점검: Python 버전, `Arm_Lib` `write6` 시그니처, I2C 사용 프로세스 (쓰기 0건)
 - [ ] p620 스냅샷 경로 구현과 `P620Camera` 연결 (현재 `NotImplementedError`)

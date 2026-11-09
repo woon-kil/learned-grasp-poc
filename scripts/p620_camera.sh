@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # p620 공유 서버에서 learned-grasp-poc만의 카메라 컨테이너를 다룬다.
 # 다른 프로젝트 컨테이너는 멈추거나 지우지 않는다. USB는 촬영 중에만 붙인다.
-# 사용: bash scripts/p620_camera.sh status|idle|acquire|release
-# 원본: simple-vision-tech-poc/scripts/p620_camera.sh. 이 사본은 아직 p620에서 실행하지 않았다.
+# 사용: bash scripts/p620_camera.sh status|idle|acquire|release|capture <출력디렉터리>
+# 원본: simple-vision-tech-poc/scripts/p620_camera.sh.
 set -euo pipefail
 
 IMAGE="${LG_CAMERA_IMAGE:-cad-less-robotics:humble-p003}"
@@ -108,8 +108,8 @@ stop_our_camera() {
     return 0
   fi
   docker exec "${NAME}" bash -lc '
-    if [ -f /tmp/b00_gemini.pid ]; then
-      kill "$(cat /tmp/b00_gemini.pid)" >/dev/null 2>&1 || true
+    if [ -f /tmp/lg_gemini.pid ]; then
+      kill "$(cat /tmp/lg_gemini.pid)" >/dev/null 2>&1 || true
     fi
     pkill -f gemini_330_series.launch.py >/dev/null 2>&1 || true
     pkill -f orbbec_camera_node >/dev/null 2>&1 || true
@@ -137,8 +137,37 @@ case "${cmd}" in
     fi
     echo "released ${NAME}"
     ;;
+  capture)
+    out="${2:-}"
+    if [ -z "${out}" ]; then
+      echo "사용: bash scripts/p620_camera.sh capture <출력디렉터리>" >&2
+      exit 2
+    fi
+    case "${out}" in
+      "${ROOT}"/*) ;;
+      *)
+        echo "촬영 결과는 이 체크아웃 안에 둔다: ${ROOT}" >&2
+        exit 2
+        ;;
+    esac
+    node="$(assert_free)"
+    trap 'stop_our_camera; recreate; echo "released ${NAME}"' EXIT
+    recreate "${node}"
+    mkdir -p "${out}"
+    docker exec \
+      -e LG_HOST="$(hostname)" \
+      -e LG_CAMERA_IMAGE="${IMAGE}" \
+      -e LG_CONTAINER="${NAME}" \
+      -e LG_USB_NODE="${node}" \
+      -e LG_PROJECT_ROOT="${ROOT}" \
+      -e HOME=/tmp \
+      -w "${WS}" \
+      "${NAME}" \
+      bash scripts/gemini_run_capture.sh "${WS}${out#"${ROOT}"}"
+    docker exec -u 0 "${NAME}" chown -R "$(id -u):$(id -g)" "${WS}${out#"${ROOT}"}"
+    ;;
   *)
-    echo "사용: $0 status|idle|acquire|release" >&2
+    echo "사용: $0 status|idle|acquire|release|capture <출력디렉터리>" >&2
     exit 2
     ;;
 esac
