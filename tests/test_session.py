@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from learned_grasp.arm import FakeArm, SafeArm
@@ -16,6 +18,7 @@ from learned_grasp.session import (
     fit_config,
     run_fit,
     run_carry_test,
+    run_close_check,
     run_grip_test,
     make_block_loader,
     make_pick_observer,
@@ -300,6 +303,48 @@ def test_carry_test_stops_after_crash_and_refuses_next_attempt(ready_config, tmp
     with pytest.raises(SafetyViolation, match="중단"):
         run_carry_test(arm3, ledger, ready_config, table, load3, 0.0, 3)
     assert fake3.writes == []
+
+
+def test_carry_test_records_read_while_holding(ready_config, tmp_path):
+    fake, arm, ledger, table, load = _carry(ready_config, tmp_path)
+    run_carry_test(arm, ledger, ready_config, table, load, 0.0, 1)
+    record = ledger.state()[0][f"carry-{ready_config.config_version}-1"]
+    assert "read_at_park" in record
+
+
+def test_carry_test_closed_time_stays_under_limit(draft_config, tmp_path):
+    config = replace(draft_config, verified_g0a=True)
+    seen = []
+    holder = {}
+
+    def sleep(seconds):
+        seen.append((len(holder["fake"].writes), seconds))
+
+    fake, arm, ledger, table, load = _carry(config, tmp_path, sleep)
+    holder["fake"] = fake
+    run_carry_test(arm, ledger, config, table, load, 5.0, 1)
+    closed = sum(seconds for count, seconds in seen if 4 <= count <= 9)
+    assert 20.0 < closed <= 30.0
+
+
+def test_close_check_closes_and_opens_at_grasp_only(ready_config):
+    seen = []
+    holder = {}
+
+    def sleep(seconds):
+        seen.append((len(holder["fake"].writes), seconds))
+
+    table = generate(ready_config.table)
+    fake = FakeArm()
+    holder["fake"] = fake
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=sleep)
+    run_close_check(arm, ready_config, table, 123.0)
+    assert len(fake.writes) == 7 and arm.pose.kind == "park"
+    q = [write[0] for write in fake.writes]
+    grips = [write[1] for write in fake.writes]
+    assert q[2] == q[3] == q[4] and q[1] == q[5] and q[0] == q[6] == ready_config.park
+    assert grips == [ready_config.open_sdk] * 3 + [ready_config.close_sdk] + [ready_config.open_sdk] * 3
+    assert [entry for entry in seen if entry[1] == 123.0] == [(4, 123.0)]
 
 
 def test_counting_driver_counts_grip_writes(tmp_path):

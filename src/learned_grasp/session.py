@@ -267,12 +267,30 @@ def run_carry_test(
     arm.goto(hover)
     arm.goto(PARK_POSE)
     arm.sleep(hold_s)
+    read_at_park = arm.read()
     arm.goto(hover)
     arm.goto(grasp)
     arm.set_grip("open")
     arm.goto(hover)
     arm.goto(PARK_POSE)
-    ledger.finish(trial["trial_id"], outcome="ok", success=True, reason="명령 완료, 관찰은 세션 문서")
+    ledger.finish(
+        trial["trial_id"], outcome="ok", success=True, reason="명령 완료, 관찰은 세션 문서", read_at_park=read_at_park
+    )
+
+
+def run_close_check(arm: SafeArm, config: Config, table: PoseTable, hold_s: float) -> None:
+    """빈 손으로 닫아 머문 뒤 연다. 닫은 손끝과 작업대의 간격은 사람이 읽는다."""
+    trial = fit_trial(config, table)
+    hover = Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"])
+    grasp = Pose(GRASP, trial["r_index"], trial["j1"], trial["j5"])
+    arm.goto(PARK_POSE)
+    arm.goto(hover)
+    arm.goto(grasp)
+    arm.set_grip("close")
+    arm.sleep(hold_s)
+    arm.set_grip("open")
+    arm.goto(hover)
+    arm.goto(PARK_POSE)
 
 
 def descend_and_stop(arm: SafeArm, config: Config, table: PoseTable) -> None:
@@ -306,7 +324,7 @@ def _driver(approval: SessionApproval, used: int) -> RemoteArm:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check"])
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
@@ -331,7 +349,7 @@ def main() -> None:
     counter = folder / "writes.count"
     used = int(counter.read_text()) if counter.exists() else 0
 
-    if args.command in ("ladder", "observe") and args.z_offset not in LADDER_OFFSETS_MM:
+    if args.command in ("ladder", "observe", "close-check") and args.z_offset not in LADDER_OFFSETS_MM:
         raise SystemExit(f"--z-offset는 {LADDER_OFFSETS_MM} 중 하나다")
     if args.command == "observe":
         record_observation(folder, args.z_offset, args.ok, args.note)
@@ -343,9 +361,9 @@ def main() -> None:
         return
     if args.command == "carry-test" and args.attempt is None:
         raise SystemExit("--attempt가 필요하다")
-    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test") and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check") and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
-    if args.command == "ladder":
+    if args.command in ("ladder", "close-check"):
         require_previous_observation(folder, args.z_offset)
         config = ladder_config(config, args.z_offset)
     if args.command in ("fit", "grip-test"):
@@ -365,6 +383,8 @@ def main() -> None:
             run_grip_test(arm, config, table, loader, min(args.hold_sec, 60.0))
         elif args.command == "carry-test":
             run_carry_test(arm, AttemptLedger(folder / "carry.jsonl"), config, table, loader, min(args.hold_sec, 60.0), args.attempt)
+        elif args.command == "close-check":
+            run_close_check(arm, config, table, min(args.hold_sec, 60.0))
         elif args.command == "descend":
             descend_and_stop(arm, config, table)
         elif args.command == "park":
