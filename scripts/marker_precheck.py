@@ -29,9 +29,9 @@ def steps() -> list[tuple[str, str, int]]:
     for spot, where in SPOTS.items():
         items += [
             (f"{spot}-base", f"[{spot}] 윗면 마커가 보이게 블록을 {where}에 놓는다", STATIC_SHOTS),
-            (f"{spot}-rotp", f"[{spot}] 같은 자리에서 안내선 기준 +10도 돌린다", ANGLE_SHOTS),
-            (f"{spot}-rotm", f"[{spot}] 같은 자리에서 안내선 기준 -10도(처음 기준)로 돌린다", ANGLE_SHOTS),
-            (f"{spot}-slide", f"[{spot}] 처음 방향으로 놓은 뒤 손으로 약간 민다", 1),
+            (f"{spot}-rotp", f"[{spot}] 블록 한쪽 끝은 그대로 두고 다른 쪽 끝만 옆으로 약 1 cm 민다(눈대중)", ANGLE_SHOTS),
+            (f"{spot}-rotm", f"[{spot}] 같은 끝을 반대쪽으로 약 2 cm 민다(처음보다 반대로 약 1 cm, 눈대중)", ANGLE_SHOTS),
+            (f"{spot}-slide", f"[{spot}] 처음 방향으로 되돌린 뒤 돌리지 말고 옆으로 약간 민다", 1),
             (f"{spot}-removed", f"[{spot}] 블록을 보드 밖으로 치운다", 1),
         ]
     items.append(("edge", "블록을 보드 오른쪽 가장자리에 걸치게 놓는다", 1))
@@ -45,8 +45,9 @@ def shoot(out: Path) -> None:
     _load_env()
     camera = P620Camera(str(out / "frames"))
     try:
-        for name, text, shots in steps():
-            input(f"{text}. 손을 빼고 Enter: ")
+        plan = steps()
+        for number, (name, text, shots) in enumerate(plan, 1):
+            input(f"({number}/{len(plan)}) {text}. 손을 빼고 Enter: ")
             for index in range(shots):
                 camera.snapshot(f"{name}-{index:02d}")
                 time.sleep(0.5)
