@@ -154,11 +154,11 @@ def _pose(kind: str, trial: dict, prefix: str = "") -> Pose:
     return Pose(kind, trial[f"{prefix}r_index"], trial[f"{prefix}j1"], trial[f"{prefix}j5"])
 
 
-def _place(arm: SafeArm, trial: dict) -> None:
-    arm.goto(_pose(HOVER, trial))
-    arm.goto(_pose(GRASP, trial))
+def _place(arm: SafeArm, trial: dict, prefix: str = "") -> None:
+    arm.goto(_pose(HOVER, trial, prefix))
+    arm.goto(_pose(GRASP, trial, prefix))
     arm.set_grip("open")
-    arm.goto(_pose(HOVER, trial))
+    arm.goto(_pose(HOVER, trial, prefix))
     arm.goto(PARK_POSE)
 
 
@@ -275,6 +275,9 @@ def run_replay(
             human_intervention=outcome.human_intervention,
             read_back=arm.read(),
         )
+    # 정상 종료에서만 내려놓는다. 예외와 중단에서는 자동 복구 이동을 하지 않는다. 시도 기록에는 넣지 않는다.
+    if has_block:
+        _place(arm, trial, "pick_")
 
 
 def summarize(sheet: list[dict], ledger: AttemptLedger) -> dict:

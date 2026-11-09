@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import rclpy
 from gemini_capture import image_array, qos, stamp_sec, write_png
-from gemini_serve_core import change_fraction
+from gemini_serve_core import change_fraction, yellow_pixels
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 
@@ -89,6 +89,8 @@ def main():
                 reply({"ok": True, "name": name, "stamp": stamp_sec(node.color.header.stamp), "mean": round(float(np.mean(image)), 1)})
             elif request["op"] == "diff":
                 reply({"ok": True, "fraction": change_fraction(saved[request["a"]], saved[request["b"]], request["roi"])})
+            elif request["op"] == "yellow":
+                reply({"ok": True, "pixels": yellow_pixels(saved[request["name"]], request["roi"])})
             else:
                 reply({"ok": False, "error": "알 수 없는 op"})
                 return

@@ -131,28 +131,41 @@ def run_ladder(arm: SafeArm, ledger: AttemptLedger, config: Config, table: PoseT
 
 # 작업 영역과 그 둘레. 카메라를 옮기면 다시 정한다. 화소 좌표이고 실측 2026-11-09 사진 기준이다.
 PICK_ROI = (540, 860, 190, 420)
-# 블록 윗면은 약 45×71 화소로 ROI의 약 4%다. 첫 시도에서 실측해 다시 정한다.
-PICK_CHANGE_MIN = 0.015
+# 후보값이다. 블록이 남은 쪽 최대 0.0144와 떠난 쪽 최소 0.0256 사이(docs/261109-1453-집기-판정-보강-플랜.md).
+PICK_CHANGE_MIN = 0.02
+# 보드 안쪽. 바깥의 나무는 노란색으로 잡힌다. 빈 보드 최대 4화소, 블록 최소 447화소 사이의 후보값이다.
+PICK_BOARD_ROI = (585, 825, 190, 395)
+PICK_YELLOW_MAX = 100
 
 
 class NeedHuman(RuntimeError):
     """사람 작업을 정해진 시간 안에 받지 못했다."""
 
 
-def make_pick_observer(camera, threshold: float = PICK_CHANGE_MIN, roi=PICK_ROI, log=print):
-    """놓은 뒤 사진과 집은 뒤 사진의 차이로 물체가 자리를 떠났는지 본다.
+def make_pick_observer(
+    camera,
+    threshold: float = PICK_CHANGE_MIN,
+    roi=PICK_ROI,
+    log=print,
+    board_roi=PICK_BOARD_ROI,
+    yellow_max: int = PICK_YELLOW_MAX,
+):
+    """놓은 뒤 사진과의 차이가 있고 보드에 노란색이 없으면 물체가 보드를 떠났다고 본다.
 
-    공중에 들려 유지되는지는 이 값으로 알 수 없다. 낙하는 사진과 감독자 관찰로 따로 본다.
+    밀린 블록은 차이가 커도 보드에 노란색이 남아 실패가 된다. 보드 밖 낙하와 공중 유지는 이 값으로
+    알 수 없어 감독자가 본다(런북 G0b 낙하 규칙).
     """
 
     def observe(trial: dict) -> Outcome:
         after = f"{trial['trial_id']}-after"
         camera.snapshot(after)
         fraction = camera.change(trial["trial_id"], after, roi)
-        log(json.dumps({"trial_id": trial["trial_id"], "change": round(fraction, 4)}), flush=True)
-        if fraction >= threshold:
-            return Outcome(True, f"변화 {fraction:.4f}")
-        return Outcome(False, f"물체가 자리에 남은 것으로 판정, 변화 {fraction:.4f}", human_intervention=True)
+        yellow = camera.yellow_pixels(after, board_roi)
+        log(json.dumps({"trial_id": trial["trial_id"], "change": round(fraction, 4), "yellow": yellow}), flush=True)
+        values = f"변화 {fraction:.4f}, 노란 화소 {yellow}"
+        if fraction >= threshold and yellow <= yellow_max:
+            return Outcome(True, values)
+        return Outcome(False, f"물체가 보드에 남은 것으로 판정, {values}", human_intervention=True)
 
     return observe
 

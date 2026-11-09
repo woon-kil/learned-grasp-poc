@@ -41,6 +41,22 @@ def test_change_fraction_detects_removed_object():
     assert core.change_fraction(before, after, roi) == pytest.approx(0.04)
     assert core.change_fraction(before, before, roi) == 0.0
     assert core.change_fraction(before, after, (0, 10, 0, 10)) == 0.0
+    assert core.yellow_pixels(before, roi) == 400
+    assert core.yellow_pixels(after, roi) == 0
+    assert core.yellow_pixels(before, (0, 10, 0, 10)) == 0
+
+
+def test_yellow_pixels_ignores_wood_and_pink():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("gemini_serve_core", Path(ROOT) / "scripts" / "gemini_serve_core.py")
+    core = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(core)
+    # 사진에서 잰 색이다. 블록 200,185,64 나무 182,170,84 분홍 220,170,190
+    image = np.zeros((1, 3, 3), np.uint8)
+    image[0] = [(200, 185, 64), (182, 170, 84), (220, 170, 190)]
+    assert core.yellow_pixels(image, (0, 1, 0, 1)) == 1
+    assert core.yellow_pixels(image, (1, 3, 0, 1)) == 0
 
 
 def test_clean_repo_passes(tmp_path):

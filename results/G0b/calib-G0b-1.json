@@ -1,0 +1,5 @@
+[
+ {"trial_id": "cal-r04-j090-p090", "cell": 100, "r_index": 4, "j1": 90, "j5": 90},
+ {"trial_id": "cal-r00-j090-p060", "cell": 101, "r_index": 0, "j1": 90, "j5": 60},
+ {"trial_id": "cal-r09-j070-p120", "cell": 102, "r_index": 9, "j1": 70, "j5": 120}
+]

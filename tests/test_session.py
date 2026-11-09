@@ -107,8 +107,9 @@ def test_ladder_records_do_not_mix_between_offsets(ready_config):
 
 
 class ChangeCamera:
-    def __init__(self, value):
+    def __init__(self, value, yellow=0):
         self.value = value
+        self.yellow = yellow
         self.names = []
 
     def snapshot(self, name):
@@ -116,6 +117,10 @@ class ChangeCamera:
 
     def change(self, before, after, roi):
         return self.value
+
+    def yellow_pixels(self, name, roi):
+        assert name in self.names
+        return self.yellow
 
 
 def test_pick_observer_uses_image_change():
@@ -125,6 +130,17 @@ def test_pick_observer_uses_image_change():
     assert camera.names == ["t-after"]
     failed = make_pick_observer(ChangeCamera(0.001), log=silent)({"trial_id": "t"})
     assert not failed.success and failed.human_intervention
+
+
+@pytest.mark.parametrize(
+    ("change", "yellow", "success"),
+    [(0.02, 100, True), (0.0199, 0, False), (0.02, 101, False), (0.3, 2000, False)],
+)
+def test_pick_observer_needs_change_and_clear_board(change, yellow, success):
+    outcome = make_pick_observer(ChangeCamera(change, yellow), log=lambda *a, **k: None)({"trial_id": "t"})
+    assert outcome.success is success
+    assert f"{change:.4f}" in outcome.reason and str(yellow) in outcome.reason
+    assert outcome.human_intervention is not success
 
 
 def _loader_arm(ready_config):

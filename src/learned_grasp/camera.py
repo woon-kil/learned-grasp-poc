@@ -19,6 +19,7 @@ class Snapshot:
 class Camera(Protocol):
     def snapshot(self, name: str) -> Snapshot: ...
     def change(self, before: str, after: str, roi: tuple[int, int, int, int]) -> float: ...
+    def yellow_pixels(self, name: str, roi: tuple[int, int, int, int]) -> int: ...
 
 
 class FakeCamera:
@@ -37,7 +38,12 @@ class FakeCamera:
         """시험용. 집기 성공을 뜻하는 큰 변화를 돌려준다."""
         return self.change_value
 
+    def yellow_pixels(self, name, roi):
+        """시험용. 보드에 노란색이 없음을 돌려준다."""
+        return self.yellow_value
+
     change_value = 1.0
+    yellow_value = 0
 
 
 class P620Camera:
@@ -75,6 +81,9 @@ class P620Camera:
 
     def change(self, before: str, after: str, roi: tuple[int, int, int, int]) -> float:
         return self._call({"op": "diff", "a": before, "b": after, "roi": list(roi)})["fraction"]
+
+    def yellow_pixels(self, name: str, roi: tuple[int, int, int, int]) -> int:
+        return self._call({"op": "yellow", "name": name, "roi": list(roi)})["pixels"]
 
     def close(self) -> None:
         try:

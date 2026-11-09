@@ -19,7 +19,7 @@ from learned_grasp.g0_runner import (
     run_replay,
     summarize,
 )
-from learned_grasp.safety import HOVER, Pose, SafetyGate
+from learned_grasp.safety import GRASP, HOVER, Pose, SafetyGate
 from learned_grasp.stats import percentile, wilson_interval
 
 
@@ -73,6 +73,48 @@ def test_all_success_passes_gate(ready_config, table, tmp_path):
     assert result["gate_pass"] and result["successes"] == 30 and result["complete"]
     assert len(loads) == 1
     assert len(camera.names) == 30
+
+
+def test_replay_puts_block_down_after_last_success(ready_config, table, tmp_path):
+    driver, arm, ledger = make(ready_config, table, tmp_path)
+    sheet = replay_sheet(ready_config, table, 1)[:1]
+    run_replay(arm, FakeCamera(), ledger, sheet, lambda t: Outcome(True), table, "stored", lambda t: None)
+    grasp = arm.gate.joints(Pose(GRASP, sheet[0]["r_index"], sheet[0]["j1"], sheet[0]["j5"]))
+    assert driver.writes[-1][1] == ready_config.open_sdk and arm.pose.kind == "park"
+    assert driver.writes[-3] == (grasp, ready_config.open_sdk, driver.writes[-3][2])
+    assert summarize(sheet, ledger)["successes"] == 1
+
+
+def test_replay_failure_does_not_put_down_again(ready_config, table, tmp_path):
+    driver, arm, ledger = make(ready_config, table, tmp_path)
+    sheet = replay_sheet(ready_config, table, 1)[:1]
+    run_replay(arm, FakeCamera(), ledger, sheet, lambda t: Outcome(False, "미집기", True), table, "stored", lambda t: None)
+    grasp = arm.gate.joints(Pose(GRASP, sheet[0]["r_index"], sheet[0]["j1"], sheet[0]["j5"]))
+    assert grasp not in [write[0] for write in driver.writes[-3:]]
+    assert arm.pose.kind == "park"
+
+
+def test_replay_crash_does_not_put_down(ready_config, table, tmp_path):
+    driver, arm, ledger = make(ready_config, table, tmp_path)
+    sheet = replay_sheet(ready_config, table, 1)[:2]
+    seen = {}
+
+    def crashing(trial):
+        seen["writes"] = len(driver.writes)
+        raise ConnectionError("연결 단절")
+
+    with pytest.raises(ConnectionError):
+        run_replay(arm, FakeCamera(), ledger, sheet, crashing, table, "stored", lambda t: None)
+    assert len(driver.writes) == seen["writes"]
+
+
+def test_replay_rerun_with_nothing_left_writes_nothing(ready_config, table, tmp_path):
+    _, arm, ledger = make(ready_config, table, tmp_path)
+    sheet = replay_sheet(ready_config, table, 1)[:1]
+    run_replay(arm, FakeCamera(), ledger, sheet, lambda t: Outcome(True), table, "stored", lambda t: None)
+    driver2, arm2, _ = make(ready_config, table, tmp_path / "other")
+    run_replay(arm2, FakeCamera(), ledger, sheet, lambda t: Outcome(True), table, "stored", lambda t: None)
+    assert driver2.writes == []
 
 
 def test_label_mode_runs(ready_config, table, tmp_path):
