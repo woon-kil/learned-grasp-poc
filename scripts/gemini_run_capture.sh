@@ -49,7 +49,10 @@ if [ "${ready}" -ne 1 ]; then
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -n "${LG_PROBE_SEC:-}" ]; then
+if [ -n "${LG_SERVE:-}" ]; then
+  # 표준입력을 서버로 넘긴다. 드라이버 출력은 파일로 가므로 JSON 통신을 오염시키지 않는다.
+  PYTHONPATH="${HERE}:${PYTHONPATH:-}" python3 "${HERE}/gemini_serve.py" "${LOG}" "${OUT}" "${LG_SETTLE_SEC:-5}"
+elif [ -n "${LG_PROBE_SEC:-}" ]; then
   PYTHONPATH="${HERE}:${PYTHONPATH:-}" python3 "${HERE}/gemini_probe.py" "${LOG}" "${OUT}" "${LG_PROBE_SEC}"
 else
   python3 "${HERE}/gemini_capture.py" "${LOG}" "${OUT}" "${LG_REPEAT:-1}" "${LG_INTERVAL_SEC:-0}"

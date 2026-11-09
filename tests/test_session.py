@@ -6,10 +6,13 @@ from learned_grasp.arm import FakeArm, SafeArm
 from learned_grasp.attempts import AttemptLedger
 from learned_grasp.kinematics import fk_batch
 from learned_grasp.pose_table import generate
-from learned_grasp.safety import SafetyGate, SafetyViolation
+from learned_grasp.safety import PARK_POSE, SafetyGate, SafetyViolation
 from learned_grasp.session import (
     LADDER_OFFSETS_MM,
     CountingDriver,
+    NeedHuman,
+    make_block_loader,
+    make_pick_observer,
     ladder_config,
     read_start_joints,
     record_observation,
@@ -96,6 +99,60 @@ def test_hold_adds_no_writes_and_waits_at_grasp(ready_config, tmp_path):
 def test_ladder_records_do_not_mix_between_offsets(ready_config):
     versions = {ladder_config(ready_config, offset).config_version for offset in LADDER_OFFSETS_MM}
     assert len(versions) == len(LADDER_OFFSETS_MM)
+
+
+class ChangeCamera:
+    def __init__(self, value):
+        self.value = value
+        self.names = []
+
+    def snapshot(self, name):
+        self.names.append(name)
+
+    def change(self, before, after, roi):
+        return self.value
+
+
+def test_pick_observer_uses_image_change():
+    silent = lambda *a, **k: None
+    camera = ChangeCamera(0.03)
+    assert make_pick_observer(camera, log=silent)({"trial_id": "t"}).success
+    assert camera.names == ["t-after"]
+    failed = make_pick_observer(ChangeCamera(0.001), log=silent)({"trial_id": "t"})
+    assert not failed.success and failed.human_intervention
+
+
+def _loader_arm(ready_config):
+    table = generate(ready_config.table)
+    fake = FakeArm()
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    arm.goto(PARK_POSE)
+    return arm, fake
+
+
+TRIAL = {"trial_id": "t", "r_index": 0, "j1": 90, "j5": 90}
+
+
+def test_block_loader_waits_at_hover_until_ready(ready_config, tmp_path):
+    arm, _ = _loader_arm(ready_config)
+    ready = tmp_path / "ready"
+    calls = []
+
+    def sleep(seconds):
+        calls.append(seconds)
+        ready.write_text("1")
+
+    make_block_loader(arm, ready, sleep=sleep, clock=lambda: 0.0, log=lambda *a, **k: None)(TRIAL)
+    assert arm.pose.kind == "hover" and calls and not ready.exists()
+
+
+def test_block_loader_ignores_stale_ready_and_times_out(ready_config, tmp_path):
+    arm, _ = _loader_arm(ready_config)
+    ready = tmp_path / "ready"
+    ready.write_text("이전 시도의 확인")
+    ticks = iter([0.0, 400.0])
+    with pytest.raises(NeedHuman):
+        make_block_loader(arm, ready, wait_s=300.0, sleep=lambda _: None, clock=lambda: next(ticks), log=lambda *a, **k: None)(TRIAL)
 
 
 def test_counting_driver_counts_grip_writes(tmp_path):

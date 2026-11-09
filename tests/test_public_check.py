@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from learned_grasp.config import ROOT
@@ -25,6 +26,21 @@ def repo(tmp_path: Path, name: str, text: str) -> Path:
 
 def check(path: Path) -> int:
     return subprocess.run(["bash", "scripts/public_check.sh"], cwd=path, capture_output=True).returncode
+
+
+def test_change_fraction_detects_removed_object():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("gemini_serve_core", Path(ROOT) / "scripts" / "gemini_serve_core.py")
+    core = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(core)
+    before = np.full((100, 100, 3), 200, np.uint8)
+    after = before.copy()
+    before[40:60, 40:60] = (230, 230, 40)
+    roi = (0, 100, 0, 100)
+    assert core.change_fraction(before, after, roi) == pytest.approx(0.04)
+    assert core.change_fraction(before, before, roi) == 0.0
+    assert core.change_fraction(before, after, (0, 10, 0, 10)) == 0.0
 
 
 def test_clean_repo_passes(tmp_path):

@@ -163,7 +163,8 @@ def _place(arm: SafeArm, trial: dict) -> None:
 
 
 def _pick(arm: SafeArm, trial: dict, prefix: str = "") -> None:
-    arm.goto(_pose(HOVER, trial, prefix))
+    if arm.pose != _pose(HOVER, trial, prefix):
+        arm.goto(_pose(HOVER, trial, prefix))
     arm.goto(_pose(GRASP, trial, prefix))
     arm.set_grip("close")
     arm.goto(_pose(HOVER, trial, prefix))
@@ -239,16 +240,17 @@ def run_replay(
         trial.setdefault("pick_r_index", trial["r_index"])
         trial.setdefault("pick_j1", trial["j1"])
         trial.setdefault("pick_j5", trial["j5"])
+        if not has_block:
+            # 사람 작업은 시도 기록 전에 끝낸다. 기다리다 끝나도 시도가 중단으로 남지 않는다.
+            load_block(trial)
+            _pick(arm, trial)
+            arm.goto(PARK_POSE)
         ledger.start(
             trial,
             mode=mode,
             place_q=arm.gate.joints(_pose(GRASP, trial)),
             pick_q=arm.gate.joints(_pose(GRASP, trial, "pick_")),
         )
-        if not has_block:
-            load_block(trial)
-            _pick(arm, trial)
-            arm.goto(PARK_POSE)
         _place(arm, trial)
         camera.snapshot(trial["trial_id"])
         if mode == "label":
@@ -257,10 +259,13 @@ def run_replay(
             if restored != original:
                 raise RuntimeError(f"라벨 복원 불일치 {trial['trial_id']}: {original} != {restored}")
         _pick(arm, trial, "pick_")
+        arm.goto(PARK_POSE)
         outcome = observer(trial)
         if not outcome.success:
+            # 물체가 남아 있을 수 있어 높은 park에서 열지 않는다. 낮은 대기 자세로 내려가 연다.
+            arm.goto(_pose(HOVER, trial, "pick_"))
             arm.set_grip("open")
-        arm.goto(PARK_POSE)
+            arm.goto(PARK_POSE)
         has_block = outcome.success
         ledger.finish(
             trial["trial_id"],

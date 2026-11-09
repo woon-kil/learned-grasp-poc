@@ -167,6 +167,26 @@ case "${cmd}" in
       bash scripts/gemini_run_capture.sh "${WS}${out#"${ROOT}"}"
     docker exec -u 0 "${NAME}" chown -R "$(id -u):$(id -g)" "${WS}${out#"${ROOT}"}"
     ;;
+  serve)
+    out="${2:-}"
+    case "${out}" in
+      "${ROOT}"/*) ;;
+      *)
+        echo "사용: bash scripts/p620_camera.sh serve <체크아웃 안의 출력디렉터리>" >&2
+        exit 2
+        ;;
+    esac
+    node="$(assert_free)"
+    trap 'docker exec -u 0 "${NAME}" chown -R "$(id -u):$(id -g)" "${WS}${out#"${ROOT}"}" >/dev/null 2>&1 || true; stop_our_camera; recreate >/dev/null; echo "released ${NAME}" >&2' EXIT
+    recreate "${node}"
+    mkdir -p "${out}"
+    docker exec -i \
+      -e LG_SERVE=1 \
+      -e HOME=/tmp \
+      -w "${WS}" \
+      "${NAME}" \
+      bash scripts/gemini_run_capture.sh "${WS}${out#"${ROOT}"}"
+    ;;
   *)
     echo "사용: $0 status|idle|acquire|release|capture <출력디렉터리>" >&2
     exit 2

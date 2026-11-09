@@ -6,7 +6,7 @@ import pytest
 
 from learned_grasp.arm import FakeArm, SafeArm
 from learned_grasp.attempts import AttemptLedger
-from learned_grasp.camera import FakeCamera, P620Camera
+from learned_grasp.camera import FakeCamera
 from learned_grasp.g0_runner import (
     J5_OFFSETS_DEG,
     LATERAL_OFFSETS_MM,
@@ -19,7 +19,7 @@ from learned_grasp.g0_runner import (
     run_replay,
     summarize,
 )
-from learned_grasp.safety import SafetyGate
+from learned_grasp.safety import HOVER, Pose, SafetyGate
 from learned_grasp.stats import percentile, wilson_interval
 
 
@@ -159,9 +159,38 @@ def test_snapshot_failure_stops_session(ready_config, table, tmp_path):
     assert arm.pose.kind == "park"
 
 
-def test_real_camera_is_explicitly_unimplemented():
-    with pytest.raises(NotImplementedError):
-        P620Camera().snapshot("x")
+def test_failed_pick_opens_low_not_at_park(ready_config, table, tmp_path):
+    """물체를 쥔 채일 수 있으니 높은 park에서 열지 않는다."""
+    driver, arm, ledger = make(ready_config, table, tmp_path)
+    sheet = replay_sheet(ready_config, table, 1)[:1]
+    run_replay(arm, FakeCamera(), ledger, sheet, lambda t: Outcome(False, "미집기", True), table, "stored", lambda t: None)
+    opens = [i for i, (q5, grip, _) in enumerate(driver.writes) if grip == ready_config.open_sdk and i and driver.writes[i - 1][1] == ready_config.close_sdk]
+    last_open = opens[-1]
+    assert driver.writes[last_open][0] != ready_config.park
+    assert driver.writes[-1][0] == ready_config.park and not arm.holding
+
+
+def test_waiting_for_human_leaves_no_interrupted_trial(ready_config, table, tmp_path):
+    _, arm, ledger = make(ready_config, table, tmp_path)
+    sheet = replay_sheet(ready_config, table, 1)
+
+    def no_human(trial):
+        raise TimeoutError("사람 없음")
+
+    with pytest.raises(TimeoutError):
+        run_replay(arm, FakeCamera(), ledger, sheet, lambda t: Outcome(True), table, "stored", no_human)
+    assert ledger.state() == ({}, set())
+
+
+def test_loader_at_hover_does_not_break_transition(ready_config, table, tmp_path):
+    _, arm, ledger = make(ready_config, table, tmp_path)
+    sheet = replay_sheet(ready_config, table, 1)[:2]
+
+    def load(trial):
+        arm.goto(Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"]))
+
+    run_replay(arm, FakeCamera(), ledger, sheet, lambda t: Outcome(True), table, "stored", load)
+    assert ledger.state()[0][sheet[1]["trial_id"]]["success"]
 
 
 def test_all_commands_stay_in_table(ready_config, table, tmp_path):

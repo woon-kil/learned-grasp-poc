@@ -5,6 +5,8 @@
   python -m learned_grasp.session ladder  --session runs/G0a-2/approval.json --z-offset 15 --start-confirmed
   python -m learned_grasp.session observe --session runs/G0a-2/approval.json --z-offset 15 --ok --note "간격 충분"
   python -m learned_grasp.session dryrun  --session runs/G0a-1/approval.json --start-confirmed
+  python -m learned_grasp.session replay  --session runs/G0b-1/approval.json --sheet runs/G0b-1/sheet.json --mode stored --start-confirmed
+  python -m learned_grasp.session ready   --session runs/G0b-1/approval.json
 
 대화형 입력이 없다. 감독자는 전원 차단으로 멈춘다. --start-confirmed는 사용자가 빈 그리퍼, 시작 자세,
 park까지의 경로를 눈으로 확인했다고 답한 뒤에만 붙인다. 높이 탐색은 앞 단계의 관찰 통과 기록이 있어야 다음 단계로 간다.
@@ -21,10 +23,11 @@ from pathlib import Path
 
 from learned_grasp.arm import RemoteArm, SafeArm, SessionApproval, load_approval
 from learned_grasp.attempts import AttemptLedger
+from learned_grasp.camera import P620Camera
 from learned_grasp.config import Config, load_config
-from learned_grasp.g0_runner import Outcome, dryrun_sheet, run_dryrun
+from learned_grasp.g0_runner import Outcome, dryrun_sheet, run_dryrun, run_replay
 from learned_grasp.pose_table import PoseTable, generate
-from learned_grasp.safety import SafetyGate, SafetyViolation
+from learned_grasp.safety import HOVER, Pose, SafetyGate, SafetyViolation
 
 # 구성 높이보다 위에서 시작해 내려온다. G0a-1은 중앙 한 곳만 확인했으므로 위치별 차이를 본다.
 LADDER_OFFSETS_MM = (15, 5, 0)
@@ -126,6 +129,55 @@ def run_ladder(arm: SafeArm, ledger: AttemptLedger, config: Config, table: PoseT
     run_dryrun(arm, ledger, ladder_sheet(config, table), _unobserved, table, at_grasp)
 
 
+# 작업 영역과 그 둘레. 카메라를 옮기면 다시 정한다. 화소 좌표이고 실측 2026-11-09 사진 기준이다.
+PICK_ROI = (540, 860, 190, 420)
+# 블록 윗면은 약 45×71 화소로 ROI의 약 4%다. 첫 시도에서 실측해 다시 정한다.
+PICK_CHANGE_MIN = 0.015
+
+
+class NeedHuman(RuntimeError):
+    """사람 작업을 정해진 시간 안에 받지 못했다."""
+
+
+def make_pick_observer(camera, threshold: float = PICK_CHANGE_MIN, roi=PICK_ROI, log=print):
+    """놓은 뒤 사진과 집은 뒤 사진의 차이로 물체가 자리를 떠났는지 본다.
+
+    공중에 들려 유지되는지는 이 값으로 알 수 없다. 낙하는 사진과 감독자 관찰로 따로 본다.
+    """
+
+    def observe(trial: dict) -> Outcome:
+        after = f"{trial['trial_id']}-after"
+        camera.snapshot(after)
+        fraction = camera.change(trial["trial_id"], after, roi)
+        log(json.dumps({"trial_id": trial["trial_id"], "change": round(fraction, 4)}), flush=True)
+        if fraction >= threshold:
+            return Outcome(True, f"변화 {fraction:.4f}")
+        return Outcome(False, f"물체가 자리에 남은 것으로 판정, 변화 {fraction:.4f}", human_intervention=True)
+
+    return observe
+
+
+def make_block_loader(arm: SafeArm, ready_path: Path, wait_s: float = 300.0, sleep=None, clock=None, log=print):
+    """팔을 그 자리 대기 자세로 보내고 사람이 물체를 놓을 때까지 기다린다. 위치 표시 역할이다."""
+    import time as _time
+
+    sleep = sleep or _time.sleep
+    clock = clock or _time.monotonic
+
+    def load(trial: dict) -> None:
+        arm.goto(Pose(HOVER, trial["r_index"], trial["j1"], trial["j5"]))
+        ready_path.unlink(missing_ok=True)
+        log(json.dumps({"need_block": trial["trial_id"]}, ensure_ascii=False), flush=True)
+        end = clock() + wait_s
+        while not ready_path.exists():
+            if clock() >= end:
+                raise NeedHuman(f"{wait_s:g}초 안에 물체 적재 확인을 받지 못했다")
+            sleep(1.0)
+        ready_path.unlink(missing_ok=True)
+
+    return load
+
+
 def _unobserved(trial: dict) -> Outcome:
     """프로그램은 무간섭을 판정하지 못한다. 이 성공은 명령 완료이고 관찰은 세션 문서에 따로 남긴다."""
     return Outcome(True, "명령 완료, 관찰은 세션 문서")
@@ -148,7 +200,9 @@ def _driver(approval: SessionApproval, used: int) -> RemoteArm:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready"])
+    parser.add_argument("--sheet", type=Path)
+    parser.add_argument("--mode", choices=["stored", "label"], default="stored")
     parser.add_argument("--session", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=Path("config/workspace.yaml"))
     parser.add_argument("--z-offset", type=float)
@@ -175,7 +229,11 @@ def main() -> None:
         record_observation(folder, args.z_offset, args.ok, args.note)
         print(f"관찰 기록: z+{args.z_offset:g} ok={args.ok}")
         return
-    if args.command in ("ladder", "dryrun") and not args.start_confirmed:
+    if args.command == "ready":
+        (folder / "block_ready").write_text("1")
+        print("물체 적재 확인을 기록했다")
+        return
+    if args.command in ("ladder", "dryrun", "replay") and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command == "ladder":
         require_previous_observation(folder, args.z_offset)
@@ -188,7 +246,17 @@ def main() -> None:
             return
         start = read_start_joints(driver, folder)
         arm = SafeArm(CountingDriver(driver, counter, approval.max_writes), SafetyGate(config, table), start_joints=start)
-        if args.command == "ladder":
+        if args.command == "replay":
+            camera = P620Camera(f"runs/{approval.session_id}/frames")
+            try:
+                sheet = json.loads(args.sheet.read_text(encoding="utf-8"))
+                run_replay(
+                    arm, camera, AttemptLedger(folder / f"replay-{args.mode}.jsonl"), sheet,
+                    make_pick_observer(camera), table, args.mode, make_block_loader(arm, folder / "block_ready"),
+                )
+            finally:
+                camera.close()
+        elif args.command == "ladder":
             run_ladder(arm, AttemptLedger(folder / f"ladder-z{args.z_offset:g}.jsonl"), config, table, min(args.hold_sec, 60.0))
         else:
             run_dryrun(arm, AttemptLedger(folder / "dryrun.jsonl"), dryrun_sheet(config, table), _unobserved, table)
