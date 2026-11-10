@@ -227,3 +227,127 @@ def _confirm_descent_offset(ctx: G0dContext, trial: dict) -> bool:
     ctx.ledger.finish(trial["trial_id"], outcome="safety_unmeasured", success=False, reason="하강 전 확인 거부")
     ctx.arm.goto(PARK_POSE)
     return False
+
+
+# ---- G0d-0 자연 흩어짐과 경로 비교 (플랜 v9 72~83행) ----
+SPREAD_CELL_REPEATS = 8
+COMPARE_REPEATS = 3
+YELLOW_HOLD_MAX = 52  # 판정값 재계획 플랜 v3: 집기 성공 사진 노란 화소가 이를 넘으면 G0d 1차에 들어가지 않는다
+
+
+def spread_sheet(config, table) -> list[dict]:
+    """일반 경로 24회(셀 고정 순서 교차) 뒤 경로 비교 18회(셀마다 복귀·일반 교차 3번). 복귀는 r 최소 단계 c*-r+를 쓴다."""
+    from learned_grasp.g0_runner import tolerance_variants
+
+    variants = {v["variant_id"]: v for v in tolerance_variants(config, table)}
+    plain = []
+    for cell in range(3):
+        base = variants[f"c{cell}-r+"]
+        plain.append({key: base[key] for key in ("cell", "r_index", "j1", "j5")} | {"pick_r_index": base["r_index"], "pick_j1": base["j1"], "pick_j5": base["j5"]})
+    sheet = []
+    for rep in range(SPREAD_CELL_REPEATS):
+        for cell in range(3):
+            sheet.append({**plain[cell], "trial_id": f"n-c{cell}-s{rep}", "path": "plain", "phase": "spread"})
+    # 복귀 경로의 효과는 같은 셀에 다시 놓은 사진으로 본다. 셀마다 복귀 다음에 일반을 두어 복귀 뒤 배치가 같은 셀이 되게 한다.
+    for cell in range(3):
+        ret = variants[f"c{cell}-r+"]
+        for rep in range(COMPARE_REPEATS):
+            sheet.append({**{k: ret[k] for k in ("cell", "r_index", "j1", "j5", "pick_r_index", "pick_j1", "pick_j5", "model_offset")}, "trial_id": f"n-c{cell}-r{rep}", "path": "return", "phase": "compare"})
+            sheet.append({**plain[cell], "trial_id": f"n-c{cell}-p{rep}", "path": "plain", "phase": "compare"})
+    return sheet
+
+
+def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> None:
+    """G0d-0. 집기 실패 1건이면 실패 경로대로 놓아 주고 멈춘다. 배치 필터는 쓰지 않는다(여기서 정한다)."""
+    arm, ledger = ctx.arm, ctx.ledger
+    if arm.close_watch is None:
+        raise ValueError("G0d는 닫힘 한도 감시가 필요하다")
+    if ctx.placement_filter is not None:
+        raise ValueError("G0d-0은 배치 필터 없이 돈다")
+    _bind(arm, ledger, ctx.table)
+    if ledger.close_interrupted():
+        raise StopSession("G0d-0은 중단 뒤 이어서 하지 않는다. 새 기록으로 다시 시작한다")
+    if ledger.state()[0]:
+        raise StopSession("G0d-0 기록이 이미 있다. 새 기록으로 시작한다")
+    arm.goto(PARK_POSE)
+    arm.set_grip("open")
+    previous = "load"
+    for index, trial in enumerate(sheet):
+        trial = dict(trial)
+        if index == 0:
+            ctx.load_block(trial)
+            _pick(arm, trial)
+            arm.goto(PARK_POSE)
+        if _place_and_check(ctx, trial) is None:
+            raise StopSession(f"{trial['trial_id']}: 배치 확인 2회 연속 실패")
+        ledger.note("spread_place", trial_id=trial["trial_id"], cell=trial["cell"], after_path=previous, frame=trial["before_frame"])
+        if trial["path"] == "return":
+            if not _confirm_descent_offset(ctx, trial):
+                raise StopSession(f"{trial['trial_id']}: 하강 전 확인 거부")
+        else:
+            ledger.start(trial)
+        _pick(arm, trial, "pick_")
+        arm.goto(PARK_POSE)
+        outcome = ctx.observer(trial)
+        if not outcome.success:
+            try:
+                _failure_path(ctx, trial, "pick_", counted=True)
+            finally:
+                ledger.finish(trial["trial_id"], outcome="failure", success=False, reason=outcome.reason, human_intervention=True)
+            raise StopSession(f"{trial['trial_id']}: G0d-0 집기 실패. 마커 영향을 재검토한다")
+        ledger.finish(trial["trial_id"], outcome="success", success=True, reason=outcome.reason, read_back=arm.read())
+        if trial["path"] == "return" and not _return_cycle(ctx, trial):
+            raise StopSession(f"{trial['trial_id']}: 복귀 재집기 실패")
+        previous = trial["path"]
+    last = dict(sheet[-1])
+    last["trial_id"] = "n-end"
+    if _place_and_check(ctx, last) is None:
+        raise StopSession("끝 배치 확인 2회 연속 실패")
+    ledger.note("spread_place", trial_id="n-end", cell=last["cell"], after_path=previous, frame=last["before_frame"])
+
+
+def summarize_spread(records: list[dict]) -> dict:
+    """기준 = 일반 경로 다음 배치의 셀별 중앙값, 흩어짐 = 그 기준에서의 편차 최대.
+    복귀 경로 다음 배치가 그 셀 흩어짐을 넘으면 transfer=unverified다. 적재 다음 배치는 기준에서 뺀다.
+    """
+    import re
+    import statistics
+
+    rows = []
+    for note in (r for r in records if r["event"] == "note" and r.get("kind") == "spread_place"):
+        m = next((r for r in records if r["event"] == "note" and r.get("kind") == "placement" and r.get("ok") and r.get("frame") == note["frame"]), None)
+        rows.append({"cell": note["cell"], "after": note["after_path"], "x": m["measurement"]["position"][0], "y": m["measurement"]["position"][1], "angle": m["measurement"]["angle"]})
+    cells = {}
+    for cell in sorted({row["cell"] for row in rows}):
+        plain = [row for row in rows if row["cell"] == cell and row["after"] == "plain"]
+        center = (statistics.median(r["x"] for r in plain), statistics.median(r["y"] for r in plain), statistics.median(r["angle"] for r in plain))
+        def dev(row):
+            return math.dist((row["x"], row["y"]), center[:2]), abs(wrap_deg(row["angle"] - center[2]))
+        pos_max = max(dev(r)[0] for r in plain)
+        ang_max = max(dev(r)[1] for r in plain)
+        returned = [dev(r) for r in rows if r["cell"] == cell and r["after"] == "return"]
+        cells[cell] = {
+            "center": [round(v, 3) for v in center], "position_max_px": round(pos_max, 3), "angle_max_deg": round(ang_max, 3),
+            "plain_n": len(plain), "return_n": len(returned),
+            "return_dev": [[round(p, 3), round(a, 3)] for p, a in returned],
+            "return_outside": sum(1 for p, a in returned if p > pos_max or a > ang_max),
+        }
+    yellow = [int(m.group(1)) for r in records if r["event"] == "finish" and r.get("success") and (m := re.search(r"노란 화소 (\d+)", r.get("reason", "")))]
+    successes = [r for r in records if r["event"] == "finish"]
+    return {
+        "cells": cells,
+        "transfer": "verified" if cells and all(c["return_outside"] == 0 and c["return_n"] == COMPARE_REPEATS for c in cells.values()) else "unverified",
+        "trials": len(successes),
+        "failures": sum(1 for r in successes if not r.get("success")),
+        "yellow_max_success": max(yellow) if yellow else None,
+        "yellow_ok": bool(yellow) and max(yellow) <= YELLOW_HOLD_MAX,
+    }
+
+
+def filter_from_spread(summary: dict) -> PlacementFilter:
+    cells = {int(k): v for k, v in summary["cells"].items()}
+    return PlacementFilter(
+        {c: tuple(v["center"]) for c, v in cells.items()},
+        {c: v["position_max_px"] for c, v in cells.items()},
+        {c: v["angle_max_deg"] for c, v in cells.items()},
+    )

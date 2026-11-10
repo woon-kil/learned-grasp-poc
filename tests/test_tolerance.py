@@ -260,3 +260,80 @@ def test_requires_close_watch(ready_config, table, tmp_path, sheet):
     world.arm.close_watch = None
     with pytest.raises(ValueError):
         world.run(sheet)
+
+
+def test_spread_sheet_shape(ready_config, table):
+    from learned_grasp.tolerance import spread_sheet
+
+    sheet = spread_sheet(ready_config, table)
+    assert len(sheet) == 42 and len({t["trial_id"] for t in sheet}) == 42
+    assert [t["cell"] for t in sheet[:6]] == [0, 1, 2, 0, 1, 2]
+    assert sum(t["path"] == "plain" for t in sheet) == 24 + 9 and sum(t["path"] == "return" for t in sheet) == 9
+    assert {t["r_index"] for t in sheet} == {1, 4, 7}
+    for t in sheet:
+        same = (t["pick_r_index"], t["pick_j1"], t["pick_j5"]) == (t["r_index"], t["j1"], t["j5"])
+        assert same is (t["path"] == "plain")
+
+
+def _spread_world(ready_config, table, tmp_path):
+    world = World(ready_config, table, tmp_path)
+    world.camera.yellow_value = 0
+    return world
+
+
+def test_natural_spread_runs_and_summarizes(ready_config, table, tmp_path):
+    from learned_grasp.tolerance import filter_from_spread, run_natural_spread, spread_sheet, summarize_spread
+
+    world = _spread_world(ready_config, table, tmp_path)
+    world.ctx.observer = lambda trial: Outcome(True, "변화 0.0500, 노란 화소 30")
+    sheet = spread_sheet(ready_config, table)
+    shift = iter(range(1000))
+    def measure(path):
+        k = next(shift)
+        return Measurement(str(path), "x" * 64, dict(REF), True, True, (float(k % 3), 0.0), float(k % 2))
+    world.marker.measure = measure
+    run_natural_spread(world.ctx, sheet)
+    descents = [a for a in world.asked if a[0] == "descent"]
+    assert len(descents) == 9 * 2  # 복귀 경로만 하강 전 확인(오프셋 집기와 복귀 재집기)
+    summary = summarize_spread(world.ledger.records())
+    assert summary["trials"] == 42 and summary["failures"] == 0
+    assert summary["yellow_max_success"] == 30 and summary["yellow_ok"]
+    assert set(summary["cells"]) == {0, 1, 2}
+    assert all(c["return_n"] == 3 for c in summary["cells"].values())
+    flt = filter_from_spread(summary)
+    assert set(flt.center) == {0, 1, 2}
+
+
+def test_natural_spread_stops_on_first_failure(ready_config, table, tmp_path):
+    from learned_grasp.tolerance import run_natural_spread, spread_sheet
+
+    world = _spread_world(ready_config, table, tmp_path)
+    sheet = spread_sheet(ready_config, table)
+    world.outcomes[sheet[3]["trial_id"]] = False
+    with pytest.raises(StopSession, match="G0d-0 집기 실패"):
+        run_natural_spread(world.ctx, sheet)
+    finished, _ = world.ledger.state()
+    assert len(finished) == 4 and not finished[sheet[3]["trial_id"]]["success"]
+
+
+def test_spread_yellow_over_limit_blocks(tmp_path):
+    from learned_grasp.tolerance import summarize_spread
+
+    records = [{"event": "finish", "success": True, "reason": "변화 0.0500, 노란 화소 53"}]
+    assert summarize_spread(records)["yellow_ok"] is False
+
+
+def test_spread_return_outside_makes_transfer_unverified():
+    from learned_grasp.tolerance import summarize_spread
+
+    records = []
+    def place(tid, cell, after, x):
+        records.append({"event": "note", "kind": "placement", "ok": True, "trial_id": tid, "frame": f"{tid}-p1", "measurement": {"position": [x, 0.0], "angle": 0.0}})
+        records.append({"event": "note", "kind": "spread_place", "trial_id": tid, "cell": cell, "after_path": after, "frame": f"{tid}-p1"})
+    for k, x in enumerate((0.0, 1.0, 2.0)):
+        place(f"a{k}", 0, "plain", x)
+    for k, x in enumerate((1.0, 1.5, 5.0)):
+        place(f"b{k}", 0, "return", x)
+    summary = summarize_spread(records)
+    assert summary["cells"][0]["position_max_px"] == 1.0 and summary["cells"][0]["return_outside"] == 1
+    assert summary["transfer"] == "unverified"
