@@ -41,6 +41,10 @@ class AttemptLedger:
     def finish(self, trial_id: str, **fields) -> None:
         self._append({"event": "finish", "trial_id": trial_id, "t": self.clock(), **fields})
 
+    def note(self, kind: str, **fields) -> None:
+        """시도가 아닌 사건(배치 확인, 복귀, 사람 답)을 남긴다. 집계 분모에 들어가지 않는다."""
+        self._append({"event": "note", "kind": kind, "t": self.clock(), **fields})
+
     def state(self) -> tuple[dict[str, dict], set[str]]:
         """완료 기록과, 시작했지만 끝나지 않은 시도 id를 돌려준다."""
         started: dict[str, dict] = {}

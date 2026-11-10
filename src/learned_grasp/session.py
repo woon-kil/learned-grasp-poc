@@ -161,7 +161,7 @@ def make_pick_observer(
     def observe(trial: dict) -> Outcome:
         after = f"{trial['trial_id']}-after"
         camera.snapshot(after)
-        fraction = camera.change(trial["trial_id"], after, roi)
+        fraction = camera.change(trial.get("before_frame", trial["trial_id"]), after, roi)
         yellow = sum(camera.yellow_pixels(after, roi) for roi in board_roi)
         log(json.dumps({"trial_id": trial["trial_id"], "change": round(fraction, 4), "yellow": yellow}), flush=True)
         values = f"변화 {fraction:.4f}, 노란 화소 {yellow}"
