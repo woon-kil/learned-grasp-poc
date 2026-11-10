@@ -355,7 +355,7 @@ def g0d_limits(session: Path) -> tuple[float, float]:
     return values[0], values[1]
 
 
-def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder: Path, session_id: str, release_s: float, sheet_path: Path | None, spread_path: Path | None) -> None:
+def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder: Path, session_id: str, release_s: float, sheet_path: Path | None, spread_path: Path | None, writes_left=None) -> None:
     """G0d-0과 G0d 1차. 쉼 묶음마다 블록을 내려놓고 끝나며, 같은 명령을 다시 실행하면 이어서 한다."""
     import hashlib
 
@@ -392,27 +392,38 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
             arm=arm, camera=camera, ledger=AttemptLedger(folder / ("spread.jsonl" if spread is None else "tolerance.jsonl")), table=table,
             observer=make_pick_observer(camera), marker=marker, placement=Placement(reference), ask=FileAnswers(folder),
             load_block=make_block_loader(arm, folder / "block_ready"), release_s=release_s,
-            placement_filter=None if spread is None else filter_from_spread(spread), binding=binding,
+            placement_filter=None if spread is None else filter_from_spread(spread), binding=binding, writes_left=writes_left,
         )
+        def end_kind() -> str:
+            return ctx.counters["end"] or "stop"  # 실행기가 끝 종류를 못 정하고 나왔으면 정지다
+
         try:
             if spread is None:
                 complete = False
                 try:
                     complete = run_natural_spread(ctx, spread_sheet(config, table))
                 finally:
-                    summary = summarize_spread(ctx.ledger.records()) | {"complete": complete, "reference": binding["reference"], "counters": ctx.counters}
+                    summary = summarize_spread(ctx.ledger.records()) | {"complete": complete, "end": end_kind(), "reference": binding["reference"], "counters": ctx.counters}
                     (folder / "spread.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
                     print(json.dumps(summary, ensure_ascii=False))
+                    print(f"끝 종류: {summary['end']}")
             else:
                 sheet = json.loads(sheet_path.read_text(encoding="utf-8"))
-                states = run_tolerance(ctx, sheet)
-                result = compute_tolerance(tolerance_variants(config, table), states, spread["transfer"]) | {"counters": ctx.counters}
-                (folder / "tolerance.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
-                print(json.dumps(result, ensure_ascii=False))
+                states = None
+                try:
+                    states = run_tolerance(ctx, sheet)
+                finally:
+                    from learned_grasp.tolerance import variant_states
+
+                    states = states if states is not None else variant_states(sheet, ctx.ledger.records())
+                    result = compute_tolerance(tolerance_variants(config, table), states, spread["transfer"]) | {"end": end_kind(), "counters": ctx.counters}
+                    (folder / "tolerance.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+                    print(json.dumps(result, ensure_ascii=False))
+                    print(f"끝 종류: {result['end']}")
             if ctx.counters["batch_end"]:
                 print("쉼 묶음 끝. 블록을 내려놓았다. 열을 확인하고 같은 명령으로 이어서 한다")
         except StopSession as error:
-            raise SystemExit(f"추가 쓰기 없이 멈췄다: {error}") from error
+            raise SystemExit(f"추가 쓰기 없이 멈췄다: {error}. 끝 종류 stop: 블록을 쥐고 있을 수 있다. 받친 상태에서 손으로 회수하고 --start-confirmed로 다시 시작한다") from error
     finally:
         camera.close()
 
@@ -483,7 +494,8 @@ def main() -> None:
         start = read_start_joints(driver, folder)
         watch = None if limits is None else CloseWatch(limits[0])
         sender = driver if watch is None else WatchedDriver(driver, watch)
-        arm = SafeArm(CountingDriver(sender, counter, approval.max_writes), SafetyGate(config, table), start_joints=start, close_watch=watch)
+        counting = CountingDriver(sender, counter, approval.max_writes)
+        arm = SafeArm(counting, SafetyGate(config, table), start_joints=start, close_watch=watch)
         loader = make_block_loader(arm, folder / "block_ready")
         if args.command == "fit":
             run_fit(arm, config, table, loader, min(args.hold_sec, 60.0))
@@ -508,7 +520,7 @@ def main() -> None:
             finally:
                 camera.close()
         elif args.command in G0D_COMMANDS:
-            run_g0d(args.command, arm, config, table, folder, approval.session_id, limits[1], args.sheet, args.spread)
+            run_g0d(args.command, arm, config, table, folder, approval.session_id, limits[1], args.sheet, args.spread, writes_left=lambda: counting.limit - counting.used())
         elif args.command == "ladder":
             run_ladder(arm, AttemptLedger(folder / f"ladder-z{args.z_offset:g}.jsonl"), config, table, min(args.hold_sec, 60.0))
         else:

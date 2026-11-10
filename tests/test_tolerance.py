@@ -33,11 +33,33 @@ class Marker:
         return Measurement(str(path), "x" * 64, dict(REF), True, True, (0.0, 0.0), 0.0)
 
 
+class LimitedArm(FakeArm):
+    """승인 max_writes처럼 상한에 닿으면 전송 전에 SafetyViolation을 낸다."""
+
+    def __init__(self, limit):
+        super().__init__()
+        self.limit = limit
+
+    def _check(self):
+        if self.limit is not None and len(self.writes) >= self.limit:
+            from learned_grasp.safety import SafetyViolation
+
+            raise SafetyViolation("세션 쓰기 상한")
+
+    def write6(self, q5, grip, time_ms):
+        self._check()
+        super().write6(q5, grip, time_ms)
+
+    def write_grip(self, grip, time_ms):
+        self._check()
+        super().write_grip(grip, time_ms)
+
+
 class World:
     """가짜 장치 묶음. ask와 판정 결과를 각본으로 준다. 사람 답 시점의 쓰기 수를 남긴다."""
 
-    def __init__(self, ready_config, table, tmp_path, limit_s=60.0):
-        self.driver = FakeArm()
+    def __init__(self, ready_config, table, tmp_path, limit_s=60.0, write_limit=None):
+        self.driver = LimitedArm(write_limit)
         self.watch = CloseWatch(limit_s, on_expire=lambda text: None)
         self.arm = SafeArm(self.driver, SafetyGate(ready_config, table), sleep=lambda _: None, close_watch=self.watch)
         ticks = iter(range(10**6))
@@ -53,6 +75,7 @@ class World:
         self.ctx = G0dContext(
             arm=self.arm, camera=self.camera, ledger=self.ledger, table=table, observer=self.observe, marker=self.marker,
             placement=Placement(REF), ask=self.ask, load_block=self.load, release_s=5.0, log=lambda text: None,
+            writes_left=None if write_limit is None else (lambda: write_limit - len(self.driver.writes)),
         )
 
     def observe(self, trial):
@@ -75,19 +98,21 @@ class World:
         self.ctx.counters["batch_end"] = False
 
     def run(self, sheet):
-        while True:
+        for _ in range(300):  # 진행 없이 묶음만 되풀이되면 멈추지 않고 실패시킨다
             self._new_batch()
             states = run_tolerance(self.ctx, sheet)
             if not self.ctx.counters["batch_end"]:
                 return states
+        raise AssertionError("묶음이 300번 되풀이돼도 끝나지 않는다")
 
     def spread(self, sheet):
         from learned_grasp.tolerance import run_natural_spread
 
-        while True:
+        for _ in range(300):
             self._new_batch()
             if run_natural_spread(self.ctx, sheet) or not self.ctx.counters["batch_end"]:
                 return
+        raise AssertionError("묶음이 300번 되풀이돼도 끝나지 않는다")
 
 
 @pytest.fixture
@@ -120,6 +145,8 @@ def test_return_cycle_command_order(ready_config, table, tmp_path, sheet):
     expected = [
         park,  # 시작 park(이미 열려 있어 개방 쓰기 없음)
         _q(arm, HOVER, trial), _q(arm, GRASP, trial), _q(arm, GRASP, trial), _q(arm, HOVER, trial), park,  # 적재 집기
+        _q(arm, HOVER, trial), _q(arm, GRASP, trial), _q(arm, GRASP, trial), _q(arm, HOVER, trial), park,  # 준비 순환 놓기
+        _q(arm, HOVER, trial), _q(arm, GRASP, trial), _q(arm, GRASP, trial), _q(arm, HOVER, trial), park,  # 준비 순환 집기
         _q(arm, HOVER, trial), _q(arm, GRASP, trial), _q(arm, GRASP, trial), _q(arm, HOVER, trial), park,  # P 놓기
         _q(arm, HOVER, trial, "pick_"), _q(arm, GRASP, trial, "pick_"), _q(arm, GRASP, trial, "pick_"), _q(arm, HOVER, trial, "pick_"), park,  # P+δ 집기
         _q(arm, HOVER, trial, "pick_"), _q(arm, GRASP, trial, "pick_"), _q(arm, GRASP, trial, "pick_"), _q(arm, HOVER, trial, "pick_"), park,  # P+δ 복귀 놓기
@@ -491,7 +518,7 @@ def test_close_count_counts_real_close_commands(ready_config, table, tmp_path, s
     world.ctx.close_batch = 10**6
     run_tolerance(world.ctx, sheet[:1])
     closes = sum(1 for (_, grip, _), (_, prev, _) in zip(world.driver.writes[1:], world.driver.writes) if grip != prev and grip == ready_config.close_sdk)
-    assert world.arm.close_count == closes == 3
+    assert world.arm.close_count == closes == 4  # 적재, 준비 순환, 오프셋 집기, 복귀 재집기
 
 
 @pytest.mark.parametrize("batch", [7, 10])
@@ -552,3 +579,110 @@ def test_spread_return_uses_smallest_r_step_per_cell(ready_config, table):
 
     picks = {t["cell"]: (t["pick_r_index"], t["model_offset"]) for t in spread_sheet(ready_config, table) if t["path"] == "return"}
     assert picks == {0: (0, -4.29), 1: (5, 4.398), 2: (8, 3.951)}
+
+
+def test_tolerance_batch_first_placement_is_after_warmup(ready_config, table, tmp_path, sheet):
+    """묶음 첫 배치도 필터를 만든 조건(일반 경로 다음)이다. 준비 순환 놓기는 필터를 쓰지 않는다."""
+    world = World(ready_config, table, tmp_path)
+    world.ctx.placement_filter = PlacementFilter({0: (0, 0, 0), 1: (0, 0, 0), 2: (0, 0, 0)}, {0: 1, 1: 1, 2: 1}, {0: 1, 1: 1, 2: 1})
+    trial = sheet[0]
+    world.marker.special[f"{trial['trial_id']}-w-p1"] = Measurement("w", "x" * 64, dict(REF), True, True, (50.0, 0.0), 0.0)  # 필터 밖
+    world.run(sheet[:1])
+    kinds = [a[0] for a in world.asked]
+    assert "reload" not in kinds  # 준비 순환 놓기에는 필터가 없다
+    notes = [r for r in world.ledger.records() if r["event"] == "note" and r.get("kind") == "placement"]
+    assert [n["trial_id"] for n in notes][:2] == [f"{trial['trial_id']}-w", trial["trial_id"]]
+    assert sum(1 for r in world.ledger.records() if r["event"] == "note" and r.get("kind") == "warmup_pick") == 1
+
+
+def _scenarios(sheet_ids):
+    return {
+        "all_success": lambda tid: True,
+        "return_fails": lambda tid: not tid.endswith("-ret"),
+        "second_round_fails": lambda tid: not tid.endswith("-t1") and not tid.endswith("-s1"),
+    }
+
+
+@pytest.mark.parametrize("scenario", ["all_success", "return_fails", "second_round_fails"])
+@pytest.mark.parametrize("which", ["tolerance", "spread"])
+def test_write_limit_sweep_never_hits_cap_while_holding(ready_config, table, tmp_path, scenario, which):
+    """남은 쓰기 예약이 맞으면 어떤 상한에서도 쓰기 상한 오류가 나지 않고 블록을 내려놓은 채 park에서 끝난다."""
+    from learned_grasp.safety import SafetyViolation
+    from learned_grasp.tolerance import run_natural_spread, spread_sheet
+
+    sheets = {"tolerance": tolerance_sheet(ready_config, table, 1), "spread": spread_sheet(ready_config, table)}
+    sheet = sheets[which]
+    rule = _scenarios(None)[scenario]
+    for limit in (60, 61, 75, 90, 111, 130, 157, 199, 240):
+        world = World(ready_config, table, tmp_path / f"{which}-{scenario}-{limit}", write_limit=limit)
+        world.ctx.close_batch = 10**6
+        world.ctx.observer = lambda trial: Outcome(rule(trial["trial_id"]), "변화 0.0500, 노란 화소 10")
+        world.arm.pose = None
+        try:
+            (run_tolerance if which == "tolerance" else run_natural_spread)(world.ctx, sheet)
+        except SafetyViolation as error:
+            raise AssertionError(f"상한 {limit}에서 쓰기 상한 오류: {error}") from error
+        except StopSession:
+            pass  # 판정 실패 답 등 의도된 정지는 이 시험의 대상이 아니다
+        else:
+            assert len(world.driver.writes) <= limit
+            assert not world.arm.holding and world.driver.writes[-1][0] == world.arm.gate.joints(PARK_POSE), (which, scenario, limit)
+            assert world.ctx.counters["end"] in ("batch", "complete")
+
+
+def test_budget_too_small_stops_before_any_write(ready_config, table, tmp_path, sheet):
+    world = World(ready_config, table, tmp_path, write_limit=40)
+    with pytest.raises(StopSession, match="남은 쓰기"):
+        run_tolerance(world.ctx, sheet)
+    assert not world.driver.writes
+
+
+@pytest.mark.parametrize("which", ["tolerance", "spread"])
+def test_batch_smaller_than_one_slot_stops_instead_of_looping(ready_config, table, tmp_path, sheet, which):
+    from learned_grasp.tolerance import run_natural_spread, spread_sheet
+
+    world = World(ready_config, table, tmp_path)
+    world.ctx.close_batch = 2
+    world._new_batch()
+    with pytest.raises(StopSession, match="한 자리 진행에 모자라다"):
+        (run_tolerance if which == "tolerance" else run_natural_spread)(world.ctx, sheet if which == "tolerance" else spread_sheet(ready_config, table))
+
+
+def test_spread_batch_four_cannot_progress_return_slot(ready_config, table, tmp_path):
+    from learned_grasp.tolerance import spread_sheet
+
+    world = _spread_world(ready_config, table, tmp_path)
+    world.ctx.close_batch = 4
+    world.ctx.observer = lambda trial: Outcome(True, "변화 0.0500, 노란 화소 30")
+    with pytest.raises(StopSession, match="한 자리 진행에 모자라다"):
+        world.spread(spread_sheet(ready_config, table))
+
+
+def test_resume_never_reuses_placement_frame_names(ready_config, table, tmp_path, sheet):
+    world = World(ready_config, table, tmp_path)
+    trial = sheet[0]
+    world.marker.special[f"{trial['trial_id']}-w-p1"] = MeasureError("reference_moved", "x")
+    with pytest.raises(StopSession):
+        world.run(sheet[:1])
+    world.marker.special.clear()
+    world.run(sheet[:1])
+    frames = [r["frame"] for r in world.ledger.records() if r["event"] == "note" and r.get("kind") == "placement"]
+    assert len(frames) == len(set(frames))
+    assert f"{trial['trial_id']}-w-p1-r2" in frames
+    photo_names = [n for n in world.camera.names if "-w-p1" in n]
+    assert len(photo_names) == len(set(photo_names)) == 2
+
+
+def test_spread_reports_warmup_placements_inside_filter():
+    from learned_grasp.tolerance import summarize_spread
+
+    records = []
+    def place(tid, cell, phase, after, x):
+        records.append({"event": "note", "kind": "placement", "ok": True, "trial_id": tid, "frame": f"{tid}-p1", "measurement": {"position": [x, 0.0], "angle": 0.0}})
+        if not tid.endswith("-w"):
+            records.append({"event": "note", "kind": "spread_place", "trial_id": tid, "cell": cell, "phase": phase, "after_path": after, "frame": f"{tid}-p1"})
+    for k, x in enumerate((0.0, 1.0)):
+        place(f"n-c0-s{k}", 0, "spread", "plain", x)
+    place("n-c0-s0-w", 0, "spread", "plain", 0.5)
+    place("n-c0-s2-w", 0, "spread", "plain", 9.0)
+    assert summarize_spread(records)["cells"][0]["warmup_in_filter"] == [1, 2]

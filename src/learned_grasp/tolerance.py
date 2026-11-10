@@ -26,6 +26,12 @@ from learned_grasp.top_marker import Measurement, MeasureError, Placement, wrap_
 Ask = Callable[[str, str, "float | None"], "str | None"]
 FAILURE_ANSWERS = ("miss", "held", "unknown")
 CLOSE_BATCH = 10  # 쉼 묶음. 실제로 보낸 닫기 명령 수로 센다(플랜 v9 172행). 묶음 끝에서 블록을 내려놓고 멈춘다.
+# 쓰기 예약. 한 자리의 최악 쓰기(적재 5, 준비 순환 13, 놓기 5, 하강 확인 1, 집기 4, 실패 경로 3, 복귀 13 = 44에 여유)와
+# 묶음 끝 내려놓기 쓰기. 남은 쓰기가 이보다 적으면 닫기 예약처럼 블록을 내려놓고 묶음을 끝낸다. tests/test_tolerance.py의
+# 상한 훑기 시험이 이 값에서 상한 오류가 나지 않음을 확인한다.
+SLOT_WRITES = 48
+END_WRITES = 6
+START_WRITES = 2
 
 
 class StopSession(RuntimeError):
@@ -65,7 +71,8 @@ class G0dContext:
     log: Callable[[str], None] = print
     binding: dict = field(default_factory=dict)  # 기록에 묶을 기준 마커·spread 해시. 다르면 이어 쓰지 않는다
     close_batch: int = CLOSE_BATCH
-    counters: dict = field(default_factory=lambda: {"return_failures": 0, "reloads": 0, "batch_end": False})
+    writes_left: Callable[[], int] | None = None  # 승인 max_writes까지 남은 쓰기 수. None이면 상한 예약을 하지 않는다(Fake 시험용)
+    counters: dict = field(default_factory=lambda: {"return_failures": 0, "reloads": 0, "batch_end": False, "end": None})
 
 
 def _measure(ctx: G0dContext, name: str) -> Measurement:
@@ -89,8 +96,24 @@ def _judge(ctx: G0dContext, trial: dict):
 
 
 def _batch_full(ctx: G0dContext, needed: int) -> bool:
-    """다음 자리에 필요한 닫기 수를 더하면 묶음을 넘는가."""
-    return ctx.arm.close_count + needed > ctx.close_batch
+    """다음 자리에 필요한 닫기 수를 더하면 묶음을 넘는가, 또는 남은 쓰기가 한 자리와 끝 내려놓기에 모자라는가."""
+    if ctx.arm.close_count + needed > ctx.close_batch:
+        return True
+    left = None if ctx.writes_left is None else ctx.writes_left()
+    return left is not None and left < SLOT_WRITES + END_WRITES
+
+
+def _require_budget(ctx: G0dContext) -> None:
+    """첫 쓰기 전에 한 자리와 끝 내려놓기가 들어갈 쓰기가 남았는지 본다. 모자라면 아무것도 보내지 않는다."""
+    left = None if ctx.writes_left is None else ctx.writes_left()
+    if left is not None and left < START_WRITES + SLOT_WRITES + END_WRITES:
+        raise StopSession(f"남은 쓰기 {left}회로는 한 자리와 끝 내려놓기를 보장하지 못한다. 쓰기 전에 멈춘다")
+
+
+def _no_progress(ctx: G0dContext, done: int) -> None:
+    """묶음이 한 자리도 못 하고 끝나면 같은 묶음이 영원히 되풀이된다. 이 경우 오류로 멈춘다."""
+    if ctx.counters["batch_end"] and done == 0:
+        raise StopSession("묶음 한도(닫기 또는 남은 쓰기)가 한 자리 진행에 모자라다. 한도를 다시 정한다")
 
 
 def _answer_deadline(ctx: G0dContext) -> float:
@@ -124,21 +147,38 @@ def _confirm_descent(ctx: G0dContext, trial: dict, prefix: str, on_arrival: Call
     return answer == "y"
 
 
-def _place_and_check(ctx: G0dContext, trial: dict) -> Measurement | None:
-    """P에 놓고 배치를 확인한다. 실패하면 쓰기 없이 사람이 다시 놓는다. 2회 연속 실패면 None."""
+def _unique_frame(ctx: G0dContext, base: str) -> str:
+    """이어하기에서 같은 이름으로 다시 찍어 p620·Mac 사진과 기록 키를 덮어쓰지 않게 한다."""
+    used = {r.get("frame") for r in ctx.ledger.records() if r["event"] == "note" and r.get("kind") == "placement"}
+    name, run = base, 1
+    while name in used:
+        run += 1
+        name = f"{base}-r{run}"
+    return name
+
+
+def _place_and_check(ctx: G0dContext, trial: dict, filtered: bool = True) -> Measurement | None:
+    """P에 놓고 배치를 확인한다. 실패하면 쓰기 없이 사람이 다시 놓는다. 2회 연속 실패면 None.
+
+    filtered=False는 적재 직후 준비 순환의 놓기다. 필터가 아니라 기준 마커와 윗면 마커만 확인한다.
+    """
     _place(ctx.arm, trial)
     for attempt in (1, 2):
-        name = f"{trial['trial_id']}-p{attempt}"
+        name = _unique_frame(ctx, f"{trial['trial_id']}-p{attempt}")
         reason = None
         try:
             m = _measure(ctx, name)
-            if ctx.placement_filter is not None and not ctx.placement_filter.accepts(trial["cell"], m):
+            if filtered and ctx.placement_filter is not None and not ctx.placement_filter.accepts(trial["cell"], m):
                 reason = f"배치 벗어남 {ctx.placement_filter.deviation(trial['cell'], m)}"
         except MeasureError as error:
-            if error.reason == "reference_moved":
-                raise StopSession(f"카메라 기준이 움직였다: {error}") from error
             m, reason = None, error.reason
+            moved = str(error) if error.reason == "reference_moved" else None
+        else:
+            moved = None
+        # 정지하는 경우에도 사진 이름을 기록에 남겨 이어하기가 같은 이름으로 덮어쓰지 않게 한다.
         ctx.ledger.note("placement", trial_id=trial["trial_id"], frame=name, ok=reason is None, reason=reason, measurement=None if m is None else m.record(), reloaded=attempt > 1)
+        if moved is not None:
+            raise StopSession(f"카메라 기준이 움직였다: {moved}")
         if reason is None:
             trial["before_frame"] = name
             return m
@@ -159,6 +199,7 @@ def _return_cycle(ctx: G0dContext, trial: dict) -> bool:
         raise StopSession(f"복귀 배치 확인 실패: {error}") from error
     ctx.ledger.note("return_place", trial_id=trial["trial_id"], frame=name, measurement=m.record())
     if not _confirm_descent(ctx, trial, ""):
+        # 세션을 끝낸다. 그리퍼는 열려 있고 블록은 P+δ에 놓여 있어 추가 이동 없이 hover에서 멈춘다(플랜 v10).
         raise StopSession(f"{trial['trial_id']}: 복귀 재집기 하강 거부")
     _pick(ctx.arm, trial)
     ctx.arm.goto(PARK_POSE)
@@ -219,23 +260,28 @@ def run_tolerance(ctx: G0dContext, sheet: list[dict]) -> dict[str, dict]:
         raise ValueError("G0d는 닫힘 한도 감시가 필요하다")
     _bind(arm, ledger, ctx.table, sheet_sha256=sheet_sha256(sheet), **ctx.binding)
     _refuse_after_misjudge(ledger)
+    _require_budget(ctx)
     ledger.close_interrupted()
     arm.goto(PARK_POSE)
     arm.set_grip("open")
     has_block = False
     trial = None
+    done = 0
     for slot in sheet:
         started = {r["trial_id"] for r in ledger.records() if r["event"] in ("start", "finish")}
         if slot["variant_id"] in variant_states(sheet, ledger.records()) or slot["trial_id"] in started:
             continue
-        if _batch_full(ctx, (0 if has_block else 1) + 2):  # 적재 + 오프셋 집기 + 복귀 재집기
+        if _batch_full(ctx, (0 if has_block else 2) + 2):  # 적재 집기+준비 순환 집기, 오프셋 집기, 복귀 재집기
             ctx.counters["batch_end"] = True
             break
+        done += 1
         trial = dict(slot)
         if not has_block:
             ctx.load_block(trial)
             _pick(arm, trial)
             arm.goto(PARK_POSE)
+            # 적재 직후 배치는 필터를 만든 조건(일반 경로 다음)과 다르다. G0d-0과 같은 준비 순환을 거친다.
+            _warmup(ctx, trial)
         measured = _place_and_check(ctx, trial)
         has_block = False
         if measured is None:
@@ -268,6 +314,8 @@ def run_tolerance(ctx: G0dContext, sheet: list[dict]) -> dict[str, dict]:
             raise
     if has_block:
         _place(arm, trial)
+    _no_progress(ctx, done)
+    ctx.counters["end"] = "batch" if ctx.counters["batch_end"] else "complete"
     return variant_states(sheet, ledger.records())
 
 
@@ -316,7 +364,7 @@ def _warmup(ctx: G0dContext, trial: dict) -> None:
     """
     warm = {**trial, "trial_id": f"{trial['trial_id']}-w", "pick_r_index": trial["r_index"], "pick_j1": trial["j1"], "pick_j5": trial["j5"]}
     try:
-        if _place_and_check(ctx, warm) is None:
+        if _place_and_check(ctx, warm, filtered=False) is None:
             raise StopSession(f"{warm['trial_id']}: 준비 순환 배치 확인 2회 연속 실패")
         _pick(ctx.arm, warm)
         ctx.arm.goto(PARK_POSE)
@@ -349,9 +397,11 @@ def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> bool:
     finished, _ = ledger.state()
     if any(not record["success"] for record in finished.values()) or any(r["event"] == "note" and r.get("kind") == "incomplete" for r in ledger.records()):
         raise StopSession("G0d-0 기록에 실패나 미완료가 있다. 이어서 하지 않는다")
+    _require_budget(ctx)
     arm.goto(PARK_POSE)
     arm.set_grip("open")
     has_block, previous, trial = False, "load", None
+    done = 0
     for slot in sheet:
         if slot["trial_id"] in finished:
             continue
@@ -360,6 +410,7 @@ def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> bool:
         if _batch_full(ctx, needed):
             ctx.counters["batch_end"] = True
             break
+        done += 1
         trial = dict(slot)
         if not has_block:
             ctx.load_block(trial)
@@ -409,6 +460,8 @@ def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> bool:
         ledger.note("spread_place", trial_id="n-end", cell=last["cell"], phase="end", after_path=previous, frame=last["before_frame"])
     elif has_block:
         _place(arm, trial)
+    _no_progress(ctx, done)
+    ctx.counters["end"] = "complete" if complete else "batch"
     return complete
 
 
@@ -444,7 +497,14 @@ def summarize_spread(records: list[dict]) -> dict:
         pos_max = max(dev(r)[0] for r in base)
         ang_max = max(dev(r)[1] for r in base)
         returned = [dev(r) for r in rows if r["cell"] == cell and r["after"] == "return"]
+        # 적재 직후 준비 순환 배치가 이 셀의 필터(기준±흩어짐 최대)를 얼마나 통과하는지. 1차는 이 배치에 필터를 쓰지 않는다.
+        warm = []
+        for r in records:
+            if r["event"] == "note" and r.get("kind") == "placement" and r.get("ok") and re.match(rf"n-c{cell}-.*-w$", r.get("trial_id", "")):
+                m = r["measurement"]
+                warm.append(dev({"x": m["position"][0], "y": m["position"][1], "angle": m["angle"]}))
         cells[cell] = {
+            "warmup_in_filter": [sum(1 for p_, a_ in warm if p_ <= pos_max and a_ <= ang_max), len(warm)],
             "center": [round(v, 3) for v in center], "position_max_px": round(pos_max, 3), "angle_max_deg": round(ang_max, 3),
             "base_n": len(base), "return_n": len(returned),
             "return_dev": [[round(p, 3), round(a, 3)] for p, a in returned],

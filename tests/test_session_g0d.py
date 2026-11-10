@@ -56,14 +56,14 @@ def test_natural_spread_batches_fix_reference_and_feed_tolerance(wired, ready_co
     assert "쉼 묶음 끝" in capsys.readouterr().out
     reference = json.loads((folder / "reference.json").read_text())
     first = json.loads((folder / "spread.json").read_text())
-    assert first["complete"] is False and first["counters"]["batch_end"]
+    assert first["complete"] is False and first["counters"]["batch_end"] and first["end"] == "batch"
     snaps_before = sum(c.names.count("reference") for c in Camera.instances)
     for _ in range(20):
         session.run_g0d("natural-spread", _arm(ready_config, table), ready_config, table, folder, "G0d-0", 5.0, None, None)
         spread = json.loads((folder / "spread.json").read_text())
         if spread["complete"]:
             break
-    assert spread["complete"] and spread["failures"] == 0 and spread["incomplete"] == 0 and spread["trials"] == 42
+    assert spread["complete"] and spread["failures"] == 0 and spread["incomplete"] == 0 and spread["trials"] == 42 and spread["end"] == "complete"
     assert sum(c.names.count("reference") for c in Camera.instances) == snaps_before  # 기준을 다시 찍지 않는다
     assert json.loads((folder / "reference.json").read_text()) == reference
     meta = next(r for r in map(json.loads, (folder / "spread.jsonl").read_text().splitlines()) if r["event"] == "meta")
@@ -75,7 +75,7 @@ def test_natural_spread_batches_fix_reference_and_feed_tolerance(wired, ready_co
     run.mkdir()
     session.run_g0d("tolerance", _arm(ready_config, table), ready_config, table, run, "G0d-1", 5.0, sheet_path, folder / "spread.json")
     result = json.loads((run / "tolerance.json").read_text())
-    assert set(result) >= {"r", "lateral", "j5"}
+    assert set(result) >= {"r", "lateral", "j5", "end"} and result["end"] in ("batch", "complete")
     meta = next(r for r in map(json.loads, (run / "tolerance.jsonl").read_text().splitlines()) if r["event"] == "meta")
     assert meta["spread_sha256"] and meta["reference"] == spread["reference"]
 
@@ -89,4 +89,22 @@ def test_tolerance_refuses_unfinished_spread(wired, ready_config, table, tmp_pat
     arm = _arm(ready_config, table)
     with pytest.raises(SystemExit, match="G0d 1차로 가지 않는다"):
         session.run_g0d("tolerance", arm, ready_config, table, tmp_path, "x", 5.0, tmp_path / "sheet.json", path)
+    assert not arm.driver.driver.writes
+
+
+def test_stop_is_marked_and_warns_about_held_block(wired, monkeypatch, ready_config, table, tmp_path):
+    monkeypatch.setattr(Camera, "yellow_value", 500)  # 판정 실패. 답은 y라 miss가 아니므로 쓰기 없이 정지
+    folder = tmp_path / "G0d-0"
+    folder.mkdir()
+    with pytest.raises(SystemExit, match="끝 종류 stop"):
+        session.run_g0d("natural-spread", _arm(ready_config, table), ready_config, table, folder, "G0d-0", 5.0, None, None)
+    assert json.loads((folder / "spread.json").read_text())["end"] == "stop"
+
+
+def test_writes_left_reaches_executor(wired, ready_config, table, tmp_path, capsys):
+    folder = tmp_path / "G0d-0"
+    folder.mkdir()
+    arm = _arm(ready_config, table)
+    with pytest.raises(SystemExit, match="남은 쓰기"):
+        session.run_g0d("natural-spread", arm, ready_config, table, folder, "G0d-0", 5.0, None, None, writes_left=lambda: 10)
     assert not arm.driver.driver.writes
