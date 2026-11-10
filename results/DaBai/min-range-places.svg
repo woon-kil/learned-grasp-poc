@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1060" font-family="Apple SD Gothic Neo, Noto Sans KR, sans-serif">
+  <rect width="1100" height="1060" fill="#fafafa"/>
+  <text x="550" y="34" font-size="24" font-weight="bold" text-anchor="middle">DaBai 최소 거리·깊이 정확도 측정 — 판을 드는 자리</text>
+  <text x="550" y="58" font-size="17" text-anchor="middle" fill="#444">팔은 park(직립), 전원 켜짐, 움직이지 않는다. 그림의 위치는 URDF 모델 계산이고 실측이 아니다. 렌즈 방향은 DaBai 영상(천장 쪽 평면)과 모델이 같다.</text>
+
+  <!-- 왼쪽: 옆모습 (팔 정면 방향 y가 오른쪽, 위가 z) -->
+  <g transform="translate(40,120) scale(0.8)">
+    <text x="260" y="0" font-size="22" font-weight="bold" text-anchor="middle">① 옆모습 (오른쪽 = 사용자가 서 있는 쪽, 위 = 천장)</text>
+    <g transform="translate(0,110)">
+    <!-- 작업대 -->
+    <rect x="0" y="720" width="520" height="14" fill="#e8c88a" stroke="#a68a50"/>
+    <text x="8" y="750" font-size="17" fill="#7a5d1f">작업대 면(z=0)</text>
+    <!-- 베이스 + 기둥 (축 y=0 은 x=260 -->
+    <rect x="215" y="640" width="90" height="80" rx="8" fill="#555"/>
+    <text x="260" y="686" font-size="17" fill="#fff" text-anchor="middle">베이스</text>
+    <rect x="252" y="270" width="16" height="370" fill="#777"/>
+    <text x="278" y="500" font-size="17" fill="#555">팔(직립)</text>
+    <!-- 그리퍼: z 366~456 (모델), 스케일 1 px = 1 mm, z=0 -> y=720 -->
+    <rect x="240" y="264" width="40" height="90" rx="4" fill="#c98f1a" fill-opacity="0.75" stroke="#7a5d1f"/>
+    <text x="290" y="300" font-size="17" fill="#7a5d1f">그리퍼(모델상 끝 z 456 mm)</text>
+    <text x="290" y="326" font-size="17" fill="#a00">그리퍼 끝(렌즈 위 약 100 mm)보다</text>
+    <text x="290" y="348" font-size="17" fill="#a00">높게 든다. 150 mm 미만은</text>
+    <text x="290" y="370" font-size="17" fill="#a00">이 자세에서 측정하지 않는다</text>
+    <!-- DaBai: y=-51 (왼쪽), z=357 -> (260-51, 720-357) -->
+    <rect x="198" y="352" width="24" height="22" fill="#1f5fd1"/>
+    <text x="190" y="346" font-size="17" font-weight="bold" fill="#1f5fd1" text-anchor="end">DaBai 렌즈 (z 357 mm)</text>
+    <!-- 렌즈 축 -->
+    <line x1="209" y1="352" x2="209" y2="-50" stroke="#1f5fd1" stroke-width="2" stroke-dasharray="6 5"/>
+    <polygon points="209,-62 203,-46 215,-46" fill="#1f5fd1"/>
+    <!-- 눈금: 렌즈 윗면에서 위로 거리 d mm -> y = 352 - d -->
+    <g stroke="#1f5fd1" fill="#1f5fd1" font-size="17">
+      <line x1="150" y1="202" x2="268" y2="202"/><text x="0" y="207" text-anchor="start">150 mm</text>
+      <line x1="150" y1="152" x2="268" y2="152"/><text x="0" y="157" text-anchor="start">200 mm</text>
+      <line x1="150" y1="52" x2="268" y2="52"/><text x="0" y="57" text-anchor="start">300 mm</text>
+      <line x1="150" y1="-48" x2="268" y2="-48"/><text x="0" y="-43" text-anchor="start">400 mm</text>
+      <line x1="150" y1="102" x2="268" y2="102"/><text x="0" y="107" text-anchor="start">250 mm</text>
+    </g>
+    <text x="330" y="207" font-size="17" fill="#1f5fd1">판 아랫면이 이 높이</text>
+    <!-- 판 예시(200 mm) -->
+    <rect x="104" y="149" width="210" height="6" fill="#fff" stroke="#000" stroke-width="2"/>
+    <text x="330" y="150" font-size="17">판은 수평, 중심이 렌즈 바로 위</text>
+    <text x="330" y="168" font-size="17">(그림은 200 mm 예. 너비 210 mm)</text>
+    </g>
+  </g>
+
+  <!-- 오른쪽: 위에서 본 모습 (카메라 사진 방향: 위=베이스, 아래=YAHBOOM 글자) -->
+  <g transform="translate(620,120)">
+    <text x="210" y="0" font-size="18" font-weight="bold" text-anchor="middle">② 위에서 본 모습 (사진 방향)</text>
+    <text x="210" y="20" font-size="13" text-anchor="middle">위 = 베이스 쪽, 아래 = YAHBOOM 글자 쪽</text>
+    <g transform="translate(0,150)">
+    <rect x="0" y="40" width="420" height="560" fill="#e8c88a"/>
+    <rect x="45" y="75" width="330" height="400" fill="#fff" stroke="#999"/>
+    <text x="210" y="460" font-size="16" fill="#2a7fb8" font-weight="bold" text-anchor="middle">YAHBOOM 글자</text>
+    <rect x="145" y="95" width="130" height="110" rx="12" fill="#555"/>
+    <text x="210" y="150" font-size="16" fill="#fff" text-anchor="middle">베이스</text>
+    <!-- DaBai: 축에서 -y 50mm -> 위쪽(베이스 쪽)으로 약 50 px 환산 아님, 표시만 -->
+    <circle cx="210" cy="108" r="9" fill="#1f5fd1"/>
+    <text x="290" y="112" font-size="15" fill="#1f5fd1" font-weight="bold">DaBai 렌즈</text>
+    <text x="290" y="130" font-size="12" fill="#1f5fd1">(베이스 중심에서</text>
+    <text x="290" y="145" font-size="12" fill="#1f5fd1">베이스 쪽으로 약 50 mm)</text>
+    <!-- 판 윤곽 -->
+    <rect x="105" y="-40" width="210" height="297" fill="none" stroke="#c0392b" stroke-width="3" stroke-dasharray="10 6"/>
+    <text x="210" y="246" font-size="14" fill="#c0392b" text-anchor="middle" font-weight="bold">판(A4, 위에서 본 크기)</text>
+    <text x="210" y="574" font-size="13" text-anchor="middle">판의 짧은 변이 좌우, 긴 변이 위아래</text>
+    <text x="210" y="592" font-size="13" text-anchor="middle">판 중심 = 렌즈 바로 위</text>
+    </g>
+  </g>
+
+  <!-- 준비물·순서 -->
+  <g transform="translate(40,880)">
+    <text x="0" y="0" font-size="17" font-weight="bold">준비물</text>
+    <text x="0" y="24" font-size="14">· 매끈한 무광 흰 판(A4 크기 이상, 구겨지지 않게 단단한 판에 붙인 것) · 줄자 또는 자(400 mm까지)</text>
+    <text x="0" y="52" font-size="17" font-weight="bold">순서 (거리: 렌즈 윗면에서 판 아랫면까지)</text>
+    <text x="0" y="76" font-size="14">1) 줄자 0을 렌즈 창에 대고 위로 세워 150 mm에 판 아랫면을 수평으로 댄다. 줄자는 판 밖에서 팔로 받친다. 2) 알려 주시면 한 장 촬영(약 12초, 팔 명령 없음).</text>
+    <text x="0" y="98" font-size="14">3) 같은 방법으로 200 → 250 → 300 → 400 mm. 거리마다 판이 움직이지 않는 상태에서 알린다. 4) 끝나면 판을 치우고 한 장(빈 장면) 더.</text>
+    <text x="0" y="126" font-size="14" fill="#a00">주의: 팔 전원은 켜져 있다. 손과 판이 그리퍼·팔에 닿지 않게 한다. 이상하면 바로 판을 치운다. 몸은 베이스 앞쪽에 서고 팔 뒤로 손을 넣지 않는다.</text>
+  </g>
+</svg>
