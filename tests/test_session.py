@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -19,6 +20,7 @@ from learned_grasp.session import (
     PICK_YELLOW_MAX,
     descend_and_stop,
     run_dabai_view,
+    run_grip_max,
     fit_config,
     run_fit,
     run_carry_test,
@@ -589,3 +591,118 @@ def test_dabai_view_cli_rejects_hover_only_on_other_commands(monkeypatch, tmp_pa
     monkeypatch.setattr(sys, "argv", ["session", "park", "--session", str(approval), "--hover-only"])
     with pytest.raises(SystemExit, match="dabai-view에서만"):
         session.main()
+
+
+# --- grip-max: close_sdk 위로 5씩 올리는 빈 손 단계 측정 ---------------------------------------------
+
+
+class LaggingFake(FakeArm):
+    """서보 6 판독이 limit을 넘지 못하는 가짜 드라이버(손가락이 막힌 상태)."""
+
+    def __init__(self, limit=None):
+        super().__init__()
+        self.limit = limit
+
+    def read(self):
+        reading = super().read()
+        values = reading.get("values")
+        if self.limit is not None and values and len(values) > 5:
+            values[5] = min(values[5], self.limit)
+        return reading
+
+
+def _grip_arm(ready_config, fake=None, sweep=True):
+    table = generate(ready_config.table)
+    fake = fake or FakeArm()
+    arm = SafeArm(fake, SafetyGate(ready_config, table, grip_sweep=sweep), sleep=lambda _: None)
+    return arm, fake
+
+
+def _grip_run(ready_config, tmp_path, fake=None, max_sdk=None, signal_every_wait=True, **kwargs):
+    arm, fake = _grip_arm(ready_config, fake)
+    signal, stop = tmp_path / "dabai_next", tmp_path / "grip_stop"
+    lines = []
+
+    def sleep(_):
+        if signal_every_wait and not signal.exists():
+            signal.write_text("1")
+
+    run_grip_max(
+        arm, ready_config, signal, stop, tmp_path, 4,
+        max_sdk=max_sdk if max_sdk is not None else ready_config.close_sdk + 10,
+        sleep=sleep, clock=kwargs.pop("clock", lambda: 0.0), log=lambda line, **k: lines.append(line), **kwargs,
+    )
+    return arm, fake, lines, [json.loads(line) for line in (tmp_path / "grip-max.jsonl").read_text(encoding="utf-8").splitlines()]
+
+
+def test_grip_max_steps_up_by_five_then_opens_and_returns(ready_config, tmp_path):
+    arm, fake, lines, ledger = _grip_run(ready_config, tmp_path)
+    grips = [w[1] for w in fake.writes]
+    close = ready_config.close_sdk
+    # park, hover, grasp(열림) | 닫기, +5, +10 | 열기 | hover, park
+    assert grips == [ready_config.open_sdk] * 3 + [close, close + 5, close + 10] + [ready_config.open_sdk] * 3
+    assert len(fake.writes) == 9 and arm.pose == PARK_POSE and not arm.holding
+    assert [item["step"] for item in ledger] == ["open", "close", "level", "level", "end"]
+    assert ledger[-1]["reason"] == "max_sdk 도달"
+    assert lines[0] == '{"arrived": "open"}' and lines[-1] == '{"end": "max_sdk 도달"}'
+
+
+def test_grip_max_auto_stops_when_servo_reading_lags(ready_config, tmp_path):
+    close = ready_config.close_sdk
+    fake = LaggingFake(limit=close + 1)  # 닫기 150은 판독 150, 155부터 판독이 막힌다
+    arm, fake, lines, ledger = _grip_run(ready_config, tmp_path, fake=fake, max_sdk=close + 20)
+    assert [w[1] for w in fake.writes][-3:] == [ready_config.open_sdk] * 3  # 열고 hover, park
+    assert max(w[1] for w in fake.writes) == close + 5  # 한 단계 올린 뒤 막힘을 보고 더 올리지 않는다
+    assert ledger[-1]["reason"] == "막힘(서보 판독이 명령에 못 미침)"
+    assert arm.pose == PARK_POSE
+
+
+def test_grip_max_stop_file_ends_sweep_and_opens(ready_config, tmp_path):
+    arm, fake = _grip_arm(ready_config)
+    signal, stop = tmp_path / "dabai_next", tmp_path / "grip_stop"
+    waits = {"n": 0}
+
+    def sleep(_):
+        waits["n"] += 1
+        if waits["n"] == 1:
+            signal.write_text("1")  # open 대기 통과
+        elif waits["n"] == 2:
+            signal.write_text("1")  # close 대기 통과
+        else:
+            stop.write_text("1")  # 첫 레벨 대기에서 정지 요청
+
+    run_grip_max(arm, ready_config, signal, stop, tmp_path, 4, max_sdk=ready_config.close_sdk + 10,
+                 sleep=sleep, clock=lambda: 0.0, log=lambda *a, **k: None)
+    ledger = [json.loads(line) for line in (tmp_path / "grip-max.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert ledger[-1]["reason"] == "정지 파일"
+    assert max(w[1] for w in fake.writes) == ready_config.close_sdk + 5
+    assert [w[1] for w in fake.writes][-3:] == [ready_config.open_sdk] * 3 and arm.pose == PARK_POSE
+
+
+def test_grip_max_timeout_opens_returns_then_raises(ready_config, tmp_path):
+    arm, fake = _grip_arm(ready_config)
+    signal, stop = tmp_path / "dabai_next", tmp_path / "grip_stop"
+    ticks = iter([0.0, 0.0, 400.0])  # 첫 대기(open)에서 상한 초과
+    with pytest.raises(NeedHuman):
+        run_grip_max(arm, ready_config, signal, stop, tmp_path, 4, max_sdk=ready_config.close_sdk + 10,
+                     sleep=lambda _: None, clock=lambda: next(ticks), log=lambda *a, **k: None)
+    assert [w[1] for w in fake.writes] == [ready_config.open_sdk] * 5  # park, hover, grasp, hover, park. 닫지 않았다
+    assert arm.pose == PARK_POSE and not arm.holding
+
+
+def test_grip_max_rejects_out_of_range_max_sdk_before_any_write(ready_config, tmp_path):
+    arm, fake = _grip_arm(ready_config)
+    for bad in (ready_config.close_sdk, 181):
+        with pytest.raises(SafetyViolation):
+            run_grip_max(arm, ready_config, tmp_path / "s", tmp_path / "t", tmp_path, 4, max_sdk=bad,
+                         sleep=lambda _: None, clock=lambda: 0.0, log=lambda *a, **k: None)
+    assert fake.writes == []
+
+
+def test_grip_max_requires_gate_flag(ready_config, tmp_path):
+    arm, fake = _grip_arm(ready_config, sweep=False)
+    signal = tmp_path / "dabai_next"
+    with pytest.raises(SafetyViolation):  # level 동작은 grip_sweep 없이는 거절, 복구 쓰기 없음
+        run_grip_max(arm, ready_config, signal, tmp_path / "grip_stop", tmp_path, 4, max_sdk=ready_config.close_sdk + 10,
+                     sleep=lambda _: signal.write_text("1"), clock=lambda: 0.0, log=lambda *a, **k: None)
+    assert max(w[1] for w in fake.writes) == ready_config.close_sdk  # 닫기까지만 나갔다

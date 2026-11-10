@@ -377,3 +377,59 @@ def test_close_watch_expires_by_clock_even_if_thread_is_late(ready_config, table
     assert len(inner.writes) == count
     watch.stop()
     assert watch.expired  # 한 번 만료되면 개방으로도 풀리지 않는다
+
+
+# --- level 동작(grip-max): close_sdk 위로 5씩 ---------------------------------------------------------
+
+
+def _closed_arm(ready_config, table, sweep=True):
+    driver = FakeArm()
+    arm = SafeArm(driver, SafetyGate(ready_config, table, grip_sweep=sweep), sleep=lambda _: None)
+    arm.goto(PARK_POSE)
+    arm.goto(hover(2))
+    arm.goto(grasp(2))
+    arm.set_grip("close")
+    return arm, driver
+
+
+def test_level_steps_up_only_after_close_at_grasp(ready_config, table):
+    arm, driver = _closed_arm(ready_config, table)
+    close = ready_config.close_sdk
+    arm.set_grip(f"level:{close + 5}")
+    assert driver.writes[-1][1] == close + 5 and arm.holding
+    arm.set_grip("open")
+    assert driver.writes[-1][1] == ready_config.open_sdk and not arm.holding
+
+
+@pytest.mark.parametrize("delta", [0, 6, -1])
+def test_level_rejects_wrong_step(ready_config, table, delta):
+    arm, driver = _closed_arm(ready_config, table)
+    count = len(driver.writes)
+    with pytest.raises(SafetyViolation):
+        arm.set_grip(f"level:{ready_config.close_sdk + delta}")
+    assert len(driver.writes) == count
+
+
+def test_level_rejects_above_hard_cap(ready_config, table):
+    from dataclasses import replace
+
+    config = replace(ready_config, close_sdk=179)
+    arm, driver = _closed_arm(config, table)
+    arm.set_grip("level:180")
+    with pytest.raises(SafetyViolation):
+        arm.set_grip("level:181")
+
+
+def test_level_requires_sweep_flag_grasp_and_closed_hand(ready_config, table):
+    arm, driver = _closed_arm(ready_config, table, sweep=False)
+    with pytest.raises(SafetyViolation):
+        arm.set_grip(f"level:{ready_config.close_sdk + 5}")
+    open_arm = SafeArm(FakeArm(), SafetyGate(ready_config, table, grip_sweep=True), sleep=lambda _: None)
+    open_arm.goto(PARK_POSE)
+    open_arm.goto(hover(2))
+    open_arm.goto(grasp(2))
+    with pytest.raises(SafetyViolation):  # 닫지 않은 손은 level로 올리지 않는다
+        open_arm.set_grip(f"level:{ready_config.open_sdk + 5}")
+    open_arm.goto(hover(2))
+    with pytest.raises(SafetyViolation):  # grasp가 아니면 거절
+        open_arm.set_grip(f"level:{ready_config.close_sdk + 5}")

@@ -181,7 +181,7 @@ class SafeArm:
             raise SafetyViolation(f"목표 미도달로 멈춘다. 목표 {q5}, SDK 반환 {values}. 감독자가 팔 상태를 확인한다")
 
     def set_grip(self, action: str) -> None:
-        grip = self.gate.check_grip(self.pose, action, self.holding)
+        grip = self.gate.check_grip(self.pose, action, self.holding, self.grip)
         if self.pose is None:
             raise SafetyViolation("자세를 모르는 상태에서 그리퍼를 움직이지 않는다")
         if grip != self.grip:
@@ -197,7 +197,7 @@ class SafeArm:
             if self.close_watch is not None and action == "open":
                 self.close_watch.stop()
         self.grip = grip
-        self.holding = action == "close"
+        self.holding = action == "close" or action.startswith("level:")
 
     def read(self) -> dict:
         return self.driver.read()

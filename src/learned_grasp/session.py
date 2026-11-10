@@ -11,6 +11,7 @@
   python -m learned_grasp.session tolerance --session runs/G0d-1/approval.json --sheet results/G0d/sheet.json --spread runs/G0d-0/spread.json --start-confirmed
   python -m learned_grasp.session answer  --session runs/G0d-0/approval.json   (다른 터미널, 실행 중 질문에 답한다)
   python -m learned_grasp.session dabai-view --session runs/DB-1/approval.json --start-confirmed [--r-index N] [--hover-only]   (도착 줄마다 촬영 뒤 `touch runs/DB-1/dabai_next`)
+  python -m learned_grasp.session grip-max --session runs/H2-C-r4/approval.json --z-offset 15 --r-index 4 --max-sdk 180 --start-confirmed   (단계마다 읽은 뒤 `touch runs/H2-C-r4/dabai_next`, 중지는 `touch runs/H2-C-r4/grip_stop`)
 
 대화형 입력이 없다. 감독자는 전원 차단으로 멈춘다. --start-confirmed는 사용자가 빈 그리퍼, 시작 자세,
 park까지의 경로를 눈으로 확인했다고 답한 뒤에만 붙인다. 높이 탐색은 앞 단계의 관찰 통과 기록이 있어야 다음 단계로 간다.
@@ -32,7 +33,7 @@ from learned_grasp.camera import P620Camera
 from learned_grasp.config import Config, load_config
 from learned_grasp.g0_runner import Outcome, compute_tolerance, dryrun_sheet, run_dryrun, run_replay, tolerance_variants
 from learned_grasp.pose_table import PoseTable, generate
-from learned_grasp.safety import GRASP, HOVER, PARK_POSE, Pose, SafetyGate, SafetyViolation
+from learned_grasp.safety import GRASP, GRIP_SWEEP_MAX_SDK, GRIP_SWEEP_STEP, HOVER, PARK_POSE, Pose, SafetyGate, SafetyViolation
 
 # 구성 높이보다 위에서 시작해 내려온다. G0a-1은 중앙 한 곳만 확인했으므로 위치별 차이를 본다.
 LADDER_OFFSETS_MM = (15, 5, 0)
@@ -322,15 +323,17 @@ def descend_and_stop(arm: SafeArm, config: Config, table: PoseTable) -> None:
 DABAI_VIEW_R_INDEX = 4
 
 
-def _wait_dabai_signal(signal: Path, name: str, wait_s: float, sleep, clock, log) -> None:
+def _wait_dabai_signal(signal: Path, name: str, wait_s: float, sleep, clock, log, stop: Path | None = None) -> bool:
+    """도착 줄을 내고 신호 파일을 기다린다. stop 파일이 먼저 생기면 True(정지 요청), 신호면 False를 돌려준다."""
     signal.unlink(missing_ok=True)
     log(json.dumps({"arrived": name}, ensure_ascii=False), flush=True)
     end = clock() + wait_s
-    while not signal.exists():
+    while not signal.exists() and not (stop is not None and stop.exists()):
         if clock() >= end:
             raise NeedHuman(f"{wait_s:g}초 안에 촬영 끝 신호를 받지 못했다({name})")
         sleep(1.0)
     signal.unlink(missing_ok=True)
+    return stop is not None and stop.exists()
 
 
 def run_dabai_view(
@@ -377,6 +380,90 @@ def run_dabai_view(
         raise
     arm.goto(hover)
     arm.goto(PARK_POSE)
+
+
+GRIP_MAX_WAIT_S = 90.0
+
+
+def run_grip_max(
+    arm: SafeArm,
+    config: Config,
+    signal: Path,
+    stop: Path,
+    folder: Path,
+    r_index: int,
+    max_sdk: int = GRIP_SWEEP_MAX_SDK,
+    wait_s: float = GRIP_MAX_WAIT_S,
+    sleep=None,
+    clock=None,
+    log=print,
+) -> None:
+    """빈 손을 grasp(z+15 구성)에서 열림, close_sdk, 그 위로 5씩 max_sdk까지 올리며 단계마다 정지해 손끝을 읽게 한다.
+
+    단계마다 서보 6 판독을 기록한다(쓰기 아님). 판독이 명령보다 (close_sdk 때의 지연 + 도착 허용치) 넘게 뒤지면
+    막힘(접촉)으로 보고 더 올리지 않는다. stop 파일, 대기 상한 초과, 막힘, max_sdk 도달 어느 쪽이든 손을 열고
+    hover, park로 정상 전이로 돌아간다. 안전 위반은 자동 쓰기 없이 올라간다. CloseWatch는 쓰지 않는다.
+    """
+    import time as _time
+
+    if not config.close_sdk < max_sdk <= GRIP_SWEEP_MAX_SDK:
+        raise SafetyViolation(f"--max-sdk {max_sdk}는 {config.close_sdk}보다 크고 {GRIP_SWEEP_MAX_SDK} 이하여야 한다")
+    sleep = sleep or _time.sleep
+    clock = clock or _time.monotonic
+    hover = Pose(HOVER, r_index, 90, 90)
+    grasp = Pose(GRASP, r_index, 90, 90)
+    ledger = folder / "grip-max.jsonl"
+    stop.unlink(missing_ok=True)
+
+    def servo6() -> int | None:
+        values = arm.read().get("values")
+        return values[5] if values and len(values) > 5 else None
+
+    def record(**item) -> None:
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    arm.goto(PARK_POSE)
+    arm.goto(hover)
+    arm.goto(grasp)
+    reason, human = "max_sdk 도달", None
+    try:
+        record(step="open", command=arm.grip, servo6=servo6())
+        if _wait_dabai_signal(signal, "open", wait_s, sleep, clock, log, stop):
+            reason = "정지 파일"
+        else:
+            arm.set_grip("close")
+            base = servo6()
+            record(step="close", command=arm.grip, servo6=base)
+            if base is None:
+                reason = "서보 판독 없음"
+            elif _wait_dabai_signal(signal, f"close:{arm.grip}", wait_s, sleep, clock, log, stop):
+                reason = "정지 파일"
+            else:
+                base_lag = arm.grip - base
+                while arm.grip + GRIP_SWEEP_STEP <= max_sdk:
+                    arm.set_grip(f"level:{arm.grip + GRIP_SWEEP_STEP}")
+                    reading = servo6()
+                    lag = None if reading is None else arm.grip - reading
+                    record(step="level", command=arm.grip, servo6=reading, lag=lag, base_lag=base_lag)
+                    if reading is None:
+                        reason = "서보 판독 없음"
+                        break
+                    if lag - base_lag > config.motion.arrival_tol_deg:
+                        reason = "막힘(서보 판독이 명령에 못 미침)"
+                        break
+                    if _wait_dabai_signal(signal, f"level:{arm.grip}", wait_s, sleep, clock, log, stop):
+                        reason = "정지 파일"
+                        break
+    except NeedHuman as error:
+        human, reason = error, "대기 상한 초과"
+    record(step="end", reason=reason, command=arm.grip)
+    log(json.dumps({"end": reason}, ensure_ascii=False), flush=True)
+    arm.set_grip("open")
+    arm.goto(hover)
+    arm.goto(PARK_POSE)
+    if human is not None:
+        raise human
 
 
 def _unobserved(trial: dict) -> Outcome:
@@ -491,10 +578,11 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", *G0D_COMMANDS, "answer"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", *G0D_COMMANDS, "answer"])
     parser.add_argument("--spread", type=Path)
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--r-index", type=int)
+    parser.add_argument("--max-sdk", type=int, default=GRIP_SWEEP_MAX_SDK, help="grip-max: 올릴 최대 SDK(close_sdk 초과, 180 이하)")
     parser.add_argument("--hover-only", action="store_true", help="dabai-view: hover에서 신호 뒤 grasp 없이 park로 돌아온다")
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
@@ -525,7 +613,7 @@ def main() -> None:
     counter = folder / "writes.count"
     used = int(counter.read_text()) if counter.exists() else 0
 
-    if args.command in ("ladder", "observe", "close-check") and args.z_offset not in LADDER_OFFSETS_MM:
+    if args.command in ("ladder", "observe", "close-check", "grip-max") and args.z_offset not in LADDER_OFFSETS_MM:
         raise SystemExit(f"--z-offset는 {LADDER_OFFSETS_MM} 중 하나다")
     if args.command == "observe":
         record_observation(folder, args.z_offset, args.ok, args.note)
@@ -535,16 +623,19 @@ def main() -> None:
         (folder / "block_ready").write_text("1")
         print("물체 적재 확인을 기록했다")
         return
+    if args.command == "grip-max":
+        if args.z_offset != 15 or args.r_index is None:
+            raise SystemExit("grip-max는 --z-offset 15와 --r-index가 필요하다")
     if args.r_index is not None:
-        if args.command not in ("close-check", "dabai-view"):
-            raise SystemExit("--r-index는 close-check와 dabai-view에서만 쓴다")
-        if args.command == "close-check":
+        if args.command not in ("close-check", "dabai-view", "grip-max"):
+            raise SystemExit("--r-index는 close-check, dabai-view, grip-max에서만 쓴다")
+        if args.command in ("close-check", "grip-max"):
             require_site_folder(folder, args.r_index)
     if args.command == "carry-test" and args.attempt is None:
         raise SystemExit("--attempt가 필요하다")
-    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", *G0D_COMMANDS) and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", *G0D_COMMANDS) and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
-    if args.command in ("ladder", "close-check"):
+    if args.command in ("ladder", "close-check", "grip-max"):
         require_previous_observation(folder, args.z_offset)
         config = ladder_config(config, args.z_offset)
     if args.command in ("fit", "grip-test"):
@@ -560,7 +651,7 @@ def main() -> None:
         watch = None if limits is None else CloseWatch(limits[0])
         sender = driver if watch is None else WatchedDriver(driver, watch)
         counting = CountingDriver(sender, counter, approval.max_writes)
-        arm = SafeArm(counting, SafetyGate(config, table), start_joints=start, close_watch=watch)
+        arm = SafeArm(counting, SafetyGate(config, table, grip_sweep=args.command == "grip-max"), start_joints=start, close_watch=watch)
         loader = make_block_loader(arm, folder / "block_ready")
         if args.command == "fit":
             run_fit(arm, config, table, loader, min(args.hold_sec, 60.0))
@@ -574,6 +665,8 @@ def main() -> None:
             descend_and_stop(arm, config, table)
         elif args.command == "dabai-view":
             run_dabai_view(arm, folder / "dabai_next", r_index=args.r_index if args.r_index is not None else DABAI_VIEW_R_INDEX, hover_only=args.hover_only)
+        elif args.command == "grip-max":
+            run_grip_max(arm, config, folder / "dabai_next", folder / "grip_stop", folder, args.r_index, args.max_sdk)
         elif args.command == "park":
             arm.goto(PARK_POSE)
         elif args.command == "replay":
