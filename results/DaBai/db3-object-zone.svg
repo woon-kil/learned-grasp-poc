@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 820" font-family="Apple SD Gothic Neo, Noto Sans KR, sans-serif">
+  <rect width="900" height="820" fill="#fafafa"/>
+  <text x="450" y="32" font-size="22" font-weight="bold" text-anchor="middle">DB-3 표적면을 높이는 물체를 놓는 자리 (위에서 본 그림, 사진 방향)</text>
+  <text x="450" y="54" font-size="14" text-anchor="middle" fill="#444">위 = 베이스 쪽, 아래 = 사용자 쪽. 모든 위치는 모델 계산(실측 아님)이고 1 px = 1 mm다. 팔은 park(직립)일 때만 놓는다.</text>
+  <!-- 작업대 영역: x=-150..150 -> 150..750, y(앞으로 mm)=0..300 -> 90..390+? 베이스 중심 (450,130) -->
+  <rect x="150" y="80" width="600" height="620" fill="#e8c88a"/>
+  <rect x="200" y="100" width="500" height="560" fill="#fff" stroke="#999"/>
+  <text x="450" y="690" font-size="13" text-anchor="middle" fill="#7a5d1f">작업대(흰 종이는 YAHBOOM 보드)</text>
+  <!-- 베이스 -->
+  <circle cx="450" cy="130" r="62" fill="#555"/>
+  <text x="450" y="135" font-size="16" fill="#fff" text-anchor="middle">베이스 중심</text>
+  <!-- 손끝(TCP) 영역: y=139 mm -> cy=130+139=269 -->
+  <rect x="380" y="240" width="140" height="60" fill="#d9534f" fill-opacity="0.25" stroke="#d9534f" stroke-width="3" stroke-dasharray="8 5"/>
+  <text x="450" y="262" font-size="15" font-weight="bold" fill="#a00" text-anchor="middle">손끝 금지 구역 (y 110~170 mm)</text>
+  <text x="450" y="280" font-size="12" fill="#a00" text-anchor="middle">모델 TCP y≈139 mm ± 여유. 물체를 두지 않는다</text>
+  <!-- 놓는 구역: y 175..265 mm -> cy 305..395 ; x ±100 -->
+  <rect x="350" y="305" width="200" height="90" fill="#5cb85c" fill-opacity="0.25" stroke="#2a8a2a" stroke-width="4"/>
+  <text x="450" y="420" font-size="16" font-weight="bold" fill="#1f6f1f" text-anchor="middle">물체 놓는 구역</text>
+  <text x="450" y="438" font-size="12" fill="#1f6f1f" text-anchor="middle">가로 200 mm × 세로 90 mm (y 175~265 mm)</text>
+  <text x="450" y="456" font-size="12" fill="#1f6f1f" text-anchor="middle">평평한 윗면이 이 구역을 덮게, 손끝 금지 구역과 닿지 않게</text>
+  <!-- DaBai 렌즈 축 바닥점: hover y=206 (cy 336), grasp y=192 (cy 322) -->
+  <circle cx="450" cy="336" r="7" fill="#1f5fd1"/><text x="465" y="352" font-size="12" fill="#1f5fd1">hover 렌즈 축 y≈206</text>
+  <circle cx="450" cy="322" r="7" fill="none" stroke="#1f5fd1" stroke-width="3"/><text x="465" y="332" font-size="12" fill="#1f5fd1">grasp 렌즈 축 y≈192</text>
+  <!-- 치수 -->
+  <line x1="170" y1="130" x2="170" y2="336" stroke="#333"/><text x="180" y="240" font-size="12" fill="#333">약 206 mm</text>
+  <!-- 설명 -->
+  <g transform="translate(20,730)">
+    <text x="0" y="0" font-size="15" font-weight="bold">순서</text>
+    <text x="0" y="22" font-size="13">1) 팔 park일 때 물체(평평한 책·판)를 초록 구역에 놓는다. 윗면이 평평하고 구역 전체를 덮을 것, 손끝 금지 구역은 비울 것.</text>
+    <text x="0" y="42" font-size="13">2) 물체 두께를 자로 잰다(작업대에서 윗면까지). 값만 알려 준다. 3) 시작 확인과 그리퍼 서보 온도를 알린다.</text>
+    <text x="0" y="62" font-size="13" fill="#a00">팔이 움직이는 동안은 손을 넣지 않는다. 물체를 바꿀 때는 세션이 끝나 팔이 park로 돌아온 뒤에만 한다.</text>
+  </g>
+</svg>
