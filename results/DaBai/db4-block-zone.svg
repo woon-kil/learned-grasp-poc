@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 850" font-family="Apple SD Gothic Neo, Noto Sans KR, sans-serif">
-  <rect width="900" height="850" fill="#fafafa"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 880" font-family="Apple SD Gothic Neo, Noto Sans KR, sans-serif">
+  <rect width="900" height="880" fill="#fafafa"/>
   <text x="450" y="32" font-size="22" font-weight="bold" text-anchor="middle">DB-4 블록(윗면 마커)을 놓는 자리 (위에서 본 그림, 사진 방향)</text>
   <text x="450" y="54" font-size="14" text-anchor="middle" fill="#444">위 = 베이스 쪽, 아래 = 사용자 쪽. 모든 위치는 모델 계산(실측 아님)이고 1 px = 1 mm다. 팔은 park(직립)일 때만 놓는다.</text>
   <!-- 작업대 영역: x=-150..150 -> 150..750, y(앞으로 mm)=0..300 -> 90..390+? 베이스 중심 (450,130) -->
@@ -31,6 +31,7 @@
     <text x="0" y="22" font-size="13">1) 팔이 park일 때 윗면 마커가 붙은 블록을 눕혀서 초록 자리에 놓는다. 베이스 중심에서 앞으로 195~225 mm를 자로 잰다.</text>
     <text x="0" y="44" font-size="13">블록은 마커 쪽 면이 위로, 긴 변이 좌우. 손끝 금지 구역은 비울 것.</text>
     <text x="0" y="66" font-size="13">2) 블록 높이(작업대에서 마커 윗면까지)를 자로 잰다. 값만 알려 준다. 3) 시작 확인과 그리퍼 서보 온도를 알린다.</text>
+    <text x="0" y="110" font-size="13">그림은 모델 좌표라서, 놓은 뒤 휴대폰으로 위에서 보드 전체가 보이게 사진 한 장을 찍어 보내 주세요(자리 확인).</text>
     <text x="0" y="88" font-size="13" fill="#a00">팔이 움직이는 동안은 손을 넣지 않는다. 물체를 바꿀 때는 세션이 끝나 팔이 park로 돌아온 뒤에만 한다.</text>
   </g>
 </svg>
