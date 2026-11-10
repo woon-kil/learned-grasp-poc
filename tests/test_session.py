@@ -14,6 +14,9 @@ from learned_grasp.session import (
     CountingDriver,
     FIT_Z_MM,
     NeedHuman,
+    PICK_BOARD_ROI,
+    PICK_CHANGE_MIN,
+    PICK_YELLOW_MAX,
     descend_and_stop,
     fit_config,
     run_fit,
@@ -112,10 +115,13 @@ def test_ladder_records_do_not_mix_between_offsets(ready_config):
 
 
 class ChangeCamera:
+    """yellow는 첫 노란색 영역의 값이다. 영역별로 주려면 {roi: 값}을 넘긴다."""
+
     def __init__(self, value, yellow=0):
         self.value = value
-        self.yellow = yellow
+        self.yellow = yellow if isinstance(yellow, dict) else {PICK_BOARD_ROI[0]: yellow}
         self.names = []
+        self.rois = []
 
     def snapshot(self, name):
         self.names.append(name)
@@ -125,7 +131,8 @@ class ChangeCamera:
 
     def yellow_pixels(self, name, roi):
         assert name in self.names
-        return self.yellow
+        self.rois.append(roi)
+        return self.yellow.get(roi, 0)
 
 
 def test_pick_observer_uses_image_change():
@@ -139,13 +146,27 @@ def test_pick_observer_uses_image_change():
 
 @pytest.mark.parametrize(
     ("change", "yellow", "success"),
-    [(0.02, 100, True), (0.0199, 0, False), (0.02, 101, False), (0.3, 2000, False)],
+    [(0.01, 100, True), (0.0099, 0, False), (0.01, 101, False), (0.3, 2000, False)],
 )
 def test_pick_observer_needs_change_and_clear_board(change, yellow, success):
     outcome = make_pick_observer(ChangeCamera(change, yellow), log=lambda *a, **k: None)({"trial_id": "t"})
     assert outcome.success is success
     assert f"{change:.4f}" in outcome.reason and str(yellow) in outcome.reason
     assert outcome.human_intervention is not success
+
+
+def test_pick_board_rois_are_fixed():
+    assert PICK_CHANGE_MIN == 0.01 and PICK_YELLOW_MAX == 100
+    assert PICK_BOARD_ROI == ((585, 825, 150, 395), (565, 585, 250, 395))
+
+
+@pytest.mark.parametrize(("first", "second", "success"), [(60, 40, True), (60, 41, False), (0, 101, False), (0, 100, True)])
+def test_pick_observer_sums_board_rois(first, second, success):
+    camera = ChangeCamera(0.05, {PICK_BOARD_ROI[0]: first, PICK_BOARD_ROI[1]: second})
+    outcome = make_pick_observer(camera, log=lambda *a, **k: None)({"trial_id": "t"})
+    assert outcome.success is success
+    assert camera.rois == list(PICK_BOARD_ROI)
+    assert str(first + second) in outcome.reason
 
 
 def _loader_arm(ready_config):

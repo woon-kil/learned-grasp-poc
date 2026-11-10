@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 1000" font-family="Apple SD Gothic Neo, Noto Sans KR, sans-serif">
+  <defs>
+    <g id="scene">
+      <rect x="0" y="40" width="500" height="600" fill="#e8c88a"/>
+      <rect x="60" y="150" width="285" height="290" fill="#fff" stroke="#999"/>
+      <rect x="115" y="60" width="180" height="164" rx="14" fill="#555"/>
+      <text x="205" y="150" font-size="22" fill="#fff" text-anchor="middle">베이스</text>
+      <rect x="187" y="320" width="34" height="32" fill="#fff" stroke="#000" stroke-width="3"/>
+      <rect x="195" y="328" width="18" height="16" fill="#000"/>
+      <path d="M232,359 L254,310 L302,327 L278,378" fill="none" stroke="#e58fb0" stroke-width="7"/>
+      <text x="205" y="428" font-size="18" text-anchor="middle" fill="#2a7fb8" font-weight="bold">YAHBOOM 글자</text>
+      <rect x="355" y="210" width="90" height="80" fill="#fff" stroke="#000" stroke-width="2"/>
+      <rect x="372" y="225" width="56" height="50" fill="#000"/>
+      <text x="400" y="308" font-size="13" text-anchor="middle">큰 마커(고정)</text>
+    </g>
+  </defs>
+
+  <rect width="1060" height="1000" fill="#fafafa"/>
+  <text x="530" y="32" font-size="24" text-anchor="middle" font-weight="bold">계약 4 블록 놓는 자리 (카메라 사진 방향: 위=베이스, 아래=글자)</text>
+
+  <!-- 위 줄: N, P1, M, P3 (베이스~글자 부분만 확대) -->
+  <g transform="translate(15,55)">
+    <svg width="250" height="330" viewBox="90 40 240 420">
+      <use href="#scene"/>
+      <rect x="183" y="205" width="40" height="82" fill="#ffe14d" fill-opacity="0.85" stroke="#1f5fd1" stroke-width="4"/>
+    </svg>
+    <text x="125" y="355" font-size="20" font-weight="bold" fill="#1f5fd1" text-anchor="middle">① N (1~5단계)</text>
+    <text x="125" y="378" font-size="13" text-anchor="middle">베이스 판에 거의 닿게</text>
+    <text x="125" y="396" font-size="13" text-anchor="middle">보드 마커는 보이게</text>
+  </g>
+  <g transform="translate(275,55)">
+    <svg width="250" height="330" viewBox="90 40 240 420">
+      <use href="#scene"/>
+      <rect x="183" y="225" width="40" height="82" fill="#ffe14d" fill-opacity="0.85" stroke="#1f5fd1" stroke-width="4"/>
+    </svg>
+    <text x="125" y="355" font-size="20" font-weight="bold" fill="#1f5fd1" text-anchor="middle">② P1 (6~10단계)</text>
+    <text x="125" y="378" font-size="13" text-anchor="middle">베이스와 보드 마커 사이 가운데</text>
+    <text x="125" y="396" font-size="13" text-anchor="middle">보드 마커는 보이게</text>
+  </g>
+  <g transform="translate(535,55)">
+    <svg width="250" height="330" viewBox="90 40 240 420">
+      <use href="#scene"/>
+      <rect x="183" y="238" width="40" height="82" fill="#ffe14d" fill-opacity="0.85" stroke="#1f5fd1" stroke-width="4"/>
+    </svg>
+    <text x="125" y="355" font-size="20" font-weight="bold" fill="#1f5fd1" text-anchor="middle">③ M (11~15단계)</text>
+    <text x="125" y="378" font-size="13" text-anchor="middle">글자 쪽 끝이 보드 마커 바로 앞</text>
+    <text x="125" y="396" font-size="13" text-anchor="middle">보드 마커는 보이게</text>
+  </g>
+  <g transform="translate(795,55)">
+    <svg width="250" height="330" viewBox="90 40 240 420">
+      <use href="#scene"/>
+      <rect x="183" y="295" width="40" height="82" fill="#ffe14d" stroke="#e0711b" stroke-width="4"/>
+    </svg>
+    <text x="125" y="355" font-size="20" font-weight="bold" fill="#e0711b" text-anchor="middle">④ P3 (16~20단계)</text>
+    <text x="125" y="378" font-size="13" text-anchor="middle">보드 마커를 완전히 덮기</text>
+    <text x="125" y="396" font-size="13" text-anchor="middle">16단계에서 y 입력</text>
+  </g>
+
+  <text x="530" y="480" font-size="15" text-anchor="middle">각 자리: 놓기(3장) → 글자 쪽 끝을 옆으로 약 1 cm → 반대로 약 2 cm → 되돌려 옆으로 밀기 → 치우기</text>
+  <text x="530" y="502" font-size="14" text-anchor="middle" fill="#555">N·P1·M은 몇 mm 차이다. 사진에서는 블록 윗부분이 베이스 판에 겹쳐 보일 수 있다.</text>
+
+  <!-- 아래: E1~E4 -->
+  <g transform="translate(20,520)">
+    <svg width="500" height="440" viewBox="0 40 500 440">
+      <use href="#scene"/>
+      <rect x="64" y="360" width="40" height="78" fill="#ffe14d" fill-opacity="0.85" stroke="#1d9a4a" stroke-width="4"/>
+      <text x="84" y="404" font-size="18" font-weight="bold" fill="#1d9a4a" text-anchor="middle">E1</text>
+      <rect x="303" y="300" width="40" height="82" fill="#ffe14d" fill-opacity="0.85" stroke="#1d9a4a" stroke-width="4"/>
+      <text x="323" y="346" font-size="18" font-weight="bold" fill="#1d9a4a" text-anchor="middle">E2</text>
+      <rect x="240" y="356" width="40" height="82" fill="#ffe14d" fill-opacity="0.85" stroke="#1d9a4a" stroke-width="4"/>
+      <text x="260" y="402" font-size="18" font-weight="bold" fill="#1d9a4a" text-anchor="middle">E3</text>
+      <rect x="64" y="272" width="40" height="80" fill="#ffe14d" fill-opacity="0.85" stroke="#1d9a4a" stroke-width="4"/>
+      <text x="84" y="317" font-size="18" font-weight="bold" fill="#1d9a4a" text-anchor="middle">E4</text>
+    </svg>
+  </g>
+  <g transform="translate(560,560)" font-size="16">
+    <text x="0" y="0" font-size="20" font-weight="bold">⑤ E1~E4 (21~24단계, 매번 y)</text>
+    <text x="0" y="40">E1 = 분홍 반대쪽(왼쪽)과 글자 쪽(아래)이</text>
+    <text x="24" y="62">만나는 모서리</text>
+    <text x="0" y="96">E2 = 분홍 쪽(오른쪽) 가장자리,</text>
+    <text x="24" y="118">큰 마커는 가리지 않기</text>
+    <text x="0" y="152">E3 = 글자 쪽(아래) 가장자리</text>
+    <text x="0" y="186">E4 = 분홍 반대쪽(왼쪽) 가장자리 가운데쯤 (새 자리)</text>
+    <text x="0" y="230" fill="#555">넷 다 블록 전체가 종이 위.</text>
+    <text x="0" y="262" fill="#555">「자리가 아니다」가 뜨면 다시 놓는다(재촬영 아님).</text>
+    <text x="0" y="300" fill="#555">위치·크기는 계약 3 사진을 보고 그린 눈대중이다.</text>
+  </g>
+</svg>

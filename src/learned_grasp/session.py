@@ -131,10 +131,12 @@ def run_ladder(arm: SafeArm, ledger: AttemptLedger, config: Config, table: PoseT
 
 # 작업 영역과 그 둘레. 카메라를 옮기면 다시 정한다. 화소 좌표이고 실측 2026-11-09 사진 기준이다.
 PICK_ROI = (540, 860, 190, 420)
-# G0b용 고정값(G0b-9, docs/261109-1957-G0b-9-교정-열-확인-결과.md). 블록이 남은 쪽 최대 0.0144와 떠난 쪽 최소 0.0256 사이(docs/261109-1453-집기-판정-보강-플랜.md).
-PICK_CHANGE_MIN = 0.02
-# 보드 안쪽. 바깥의 나무는 노란색으로 잡힌다. 빈 보드 최대 4화소(G0b-9 가장자리 최대 20), 블록 최소 447화소 사이의 고정값이다.
-PICK_BOARD_ROI = (585, 825, 190, 395)
+# 판정값 재계획(docs/261110-1008-G0d-판정값-재계획-플랜.md). 변화는 보조 조건이다. 움직임 없는 장면 0.0005,
+# 블록 아닌 변화 0.007과 윗면 마커 블록 제거 최소 0.0182 사이다. 블록이 남았는지는 노란색이 가른다.
+PICK_CHANGE_MIN = 0.01
+# 보드 안쪽 사각형들의 합. 바깥의 나무는 노란색으로 잡힌다. 위쪽 y 150까지와 종이 왼쪽 띠다.
+# 빈 보드 0~4, 쥔 블록 운반 사진 최대 52, 계약 3 남은 블록 최소 415화소 사이의 고정값이다.
+PICK_BOARD_ROI = ((585, 825, 150, 395), (565, 585, 250, 395))
 PICK_YELLOW_MAX = 100
 
 
@@ -160,7 +162,7 @@ def make_pick_observer(
         after = f"{trial['trial_id']}-after"
         camera.snapshot(after)
         fraction = camera.change(trial["trial_id"], after, roi)
-        yellow = camera.yellow_pixels(after, board_roi)
+        yellow = sum(camera.yellow_pixels(after, roi) for roi in board_roi)
         log(json.dumps({"trial_id": trial["trial_id"], "change": round(fraction, 4), "yellow": yellow}), flush=True)
         values = f"변화 {fraction:.4f}, 노란 화소 {yellow}"
         if fraction >= threshold and yellow <= yellow_max:

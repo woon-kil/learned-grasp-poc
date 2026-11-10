@@ -376,11 +376,7 @@ def main() -> int:
     parser.add_argument("--dir", type=Path)
     args = parser.parse_args()
     if args.command == "shoot":
-        if args.out.exists():
-            sys.exit(f"이미 있다: {args.out}")
-        args.out.mkdir(parents=True)
-        shoot(args.out)
-        return 0
+        sys.exit("계약 3은 끝났다. 촬영은 scripts/marker_precheck4.py shoot 만 쓴다.")
     if args.command == "fetch":
         return fetch(args.out)
     if args.p3_photo_covered is None:
