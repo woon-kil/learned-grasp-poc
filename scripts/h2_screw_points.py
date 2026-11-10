@@ -3,6 +3,8 @@
 
 절차(실행 전 고정): 회색조 → DoG(σ1 − σ4) → 임계(최대의 0.6) 연결 성분 → 면적 ≥ 3 → 면적이 큰 두 성분 중
 행 차이 ≤ 4 화소, 간격 10~25 화소인 쌍 → 각 점은 DoG 양수 가중 무게중심(하위 화소).
+각 장에서 보드 마커 id 1(36h11, 빨강 채널, 기본 파라미터)의 중심도 기록해 카메라가 움직이지 않았는지 본다.
+영상 가장자리까지의 여백(화소)을 함께 낸다.
 사용: uv run python scripts/h2_screw_points.py <hover|grasp> <png...>
 """
 import json
@@ -10,8 +12,21 @@ import sys
 
 import cv2
 import numpy as np
+from cv2 import aruco
 
 ROI = {"hover": (700, 0, 780, 70), "grasp": (690, 70, 770, 140)}  # x0, y0, x1, y1 (H2-0 사진 기준 대략 위치)
+
+
+def board_marker_center(path: str):
+    img = cv2.imread(path)
+    det = aruco.ArucoDetector(aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11), aruco.DetectorParameters())
+    corners, ids, _ = det.detectMarkers(img[:, :, 2])
+    if ids is None:
+        return None
+    for c, i in zip(corners, ids.ravel()):
+        if int(i) == 1:
+            return c.reshape(4, 2).mean(0).tolist()
+    return None
 
 
 def find_pair(path: str, pose: str):
@@ -40,8 +55,11 @@ def find_pair(path: str, pose: str):
 
 def main() -> None:
     pose, paths = sys.argv[1], sys.argv[2:]
-    rows, miss = [], 0
+    rows, miss, boards = [], 0, []
     for path in paths:
+        board = board_marker_center(path)
+        if board is not None:
+            boards.append(board)
         pair = find_pair(path, pose)
         if pair is None:
             miss += 1
@@ -52,6 +70,12 @@ def main() -> None:
     out = {"pose": pose, "frames": len(paths), "detected": len(rows), "missed": miss}
     if len(rows):
         mid = np.c_[(a[:, 0] + a[:, 2]) / 2, (a[:, 1] + a[:, 3]) / 2]
+        h, w = cv2.imread(paths[0]).shape[:2]
+        margin = float(min(a[:, 0].min(), a[:, 1].min(), w - a[:, 2].max(), h - a[:, 3].max()))
+        out |= {"edge_margin_px": round(margin, 1)}
+        if boards:
+            b = np.array(boards)
+            out |= {"board_id1_frames": len(boards), "board_id1_mean": b.mean(0).round(2).tolist(), "board_id1_std": b.std(0, ddof=1).round(3).tolist() if len(b) > 1 else None}
         out |= {"mid_mean": mid.mean(0).round(2).tolist(), "mid_std": mid.std(0, ddof=1).round(3).tolist() if len(rows) > 1 else None,
                 "spacing_mean": float((a[:, 2] - a[:, 0]).mean().round(2)), "left": a[:, :2].mean(0).round(2).tolist(), "right": a[:, 2:].mean(0).round(2).tolist()}
     print(json.dumps(out, ensure_ascii=False))
