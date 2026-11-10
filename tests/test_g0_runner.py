@@ -8,12 +8,13 @@ from learned_grasp.arm import FakeArm, SafeArm
 from learned_grasp.attempts import AttemptLedger
 from learned_grasp.camera import FakeCamera
 from learned_grasp.g0_runner import (
-    J5_OFFSETS_DEG,
-    LATERAL_OFFSETS_MM,
     Outcome,
+    TOL_TRIALS,
     compute_tolerance,
     dryrun_sheet,
-    offset_sheet,
+    tolerance_sheet,
+    tolerance_variants,
+    variant_verdict,
     replay_sheet,
     run_dryrun,
     run_replay,
@@ -329,55 +330,95 @@ def test_gate_pass_absent_for_gates_without_threshold(ready_config, table, tmp_p
     assert summarize(sheet, ledger)["gate_pass"] is None
 
 
-def _tol_records(cell_results):
-    records = []
-    for (cell, offset), successes in cell_results.items():
-        records += [
-            {"axis": "j5", "cell": cell, "offset": offset, "success": index < successes} for index in range(5)
-        ]
-    return records
+# 플랜 v9 238~246행에서 실측한 표 모델 값. 표가 바뀌면 이 시험이 먼저 깨진다.
+PLAN_STEPS = {
+    "c0-r-": (1, 0, 90, 90, -4.29), "c0-r+": (1, 2, 90, 90, 5.622),
+    "c1-r-": (4, 3, 90, 90, -5.554), "c1-r+": (4, 5, 90, 90, 4.398),
+    "c2-r-": (7, 6, 90, 90, -5.581), "c2-r+": (7, 8, 90, 90, 3.951),
+    "c0-lateral+": (1, 1, 91, 90, 2.165), "c1-lateral+": (4, 4, 91, 90, 2.438), "c2-lateral+": (7, 7, 91, 90, 2.708),
+}
 
 
-def test_tolerance_takes_worst_cell_and_sign():
-    results = {(c, s * v): 5 for c in range(3) for v in J5_OFFSETS_DEG for s in (1, -1)}
-    results[(1, -20)] = 3
-    assert compute_tolerance(_tol_records(results), "j5", J5_OFFSETS_DEG) == 10
+def test_tolerance_variants_match_plan(ready_config, table):
+    variants = {v["variant_id"]: v for v in tolerance_variants(ready_config, table)}
+    assert len(variants) == 18
+    for vid, (r_index, pick_r, pick_j1, pick_j5, offset) in PLAN_STEPS.items():
+        v = variants[vid]
+        assert (v["r_index"], v["pick_r_index"], v["pick_j1"], v["pick_j5"], v["model_offset"]) == (r_index, pick_r, pick_j1, pick_j5, offset)
+    for cell, r_index in enumerate((1, 4, 7)):
+        lat = variants[f"c{cell}-lateral-"]
+        assert (lat["pick_r_index"], lat["pick_j1"], lat["pick_j5"]) == (r_index, 89, 90)
+        assert lat["model_offset"] == -variants[f"c{cell}-lateral+"]["model_offset"]
+        for sign, j5 in (("-", 80), ("+", 100)):
+            v = variants[f"c{cell}-j5{sign}"]
+            assert (v["pick_r_index"], v["pick_j1"], v["pick_j5"], v["model_offset"]) == (r_index, 90, j5, float(j5 - 90))
+    poses = {(v["pick_r_index"], v["pick_j1"], v["pick_j5"]) for v in variants.values()}
+    assert len(poses) == 18
+    assert all((v["pick_r_index"], v["pick_j1"], v["pick_j5"]) != (v["r_index"], v["j1"], v["j5"]) for v in variants.values())
 
 
-def test_tolerance_ignores_success_after_small_failure():
-    results = {(c, s * v): 5 for c in range(3) for v in J5_OFFSETS_DEG for s in (1, -1)}
-    results[(0, 10)] = 0
-    assert compute_tolerance(_tol_records(results), "j5", J5_OFFSETS_DEG) == 0
+def test_tolerance_sheet_fixed_interleaved_rounds(ready_config, table):
+    sheet = tolerance_sheet(ready_config, table, 1)
+    assert sheet == tolerance_sheet(ready_config, table, 1)
+    assert sheet != tolerance_sheet(ready_config, table, 2)
+    assert len(sheet) == 18 * TOL_TRIALS and len({t["trial_id"] for t in sheet}) == len(sheet)
+    for round_index in range(TOL_TRIALS):
+        block = sheet[18 * round_index:18 * (round_index + 1)]
+        assert {t["round"] for t in block} == {round_index}
+        assert len({t["variant_id"] for t in block}) == 18
 
 
-def test_offset_sheet_fixed_and_applied(ready_config, table, tmp_path):
-    sheet = offset_sheet(ready_config, table, 1)
-    assert sheet == offset_sheet(ready_config, table, 1)
-    assert len(sheet) == 3 * (3 * 2 + 3 * 2 + 2 * 2) * 5
-    assert {t["axis"] for t in sheet} == {"r", "lateral", "j5"}
-    lateral = [t for t in sheet if t["axis"] == "lateral"]
-    assert all(t["pick_j1"] != t["j1"] and t["pick_r_index"] == t["r_index"] for t in lateral)
-    assert {t["pick_j1"] > t["j1"] for t in lateral} == {True, False}
-    assert all(ready_config.j1_range[0] <= t["pick_j1"] <= ready_config.j1_range[1] for t in lateral)
-    _, arm, ledger = make(ready_config, table, tmp_path)
-    run_replay(arm, FakeCamera(), ledger, sheet, lambda t: Outcome(True), table, "stored", lambda t: None)
-    finished, _ = ledger.state()
-    assert compute_tolerance(list(finished.values()), "j5", J5_OFFSETS_DEG) == 20
-    assert compute_tolerance(list(finished.values()), "lateral", LATERAL_OFFSETS_MM) == 10
+def test_variant_verdict_matches_fixed_five_for_all_sequences():
+    """32개 결과열 전부에서 조기 종결이 5회 고정·4성공 기준과 같은 결론을 낸다."""
+    from itertools import product
+
+    for sequence in product((True, False), repeat=TOL_TRIALS):
+        fixed = "pass" if sum(sequence) >= 4 else "fail"
+        early = next(v for n in range(1, TOL_TRIALS + 1) if (v := variant_verdict(list(sequence[:n]))) is not None)
+        assert early == fixed, sequence
 
 
-def test_offset_sheet_records_actual_offset(ready_config, table):
-    """표 간격 때문에 명목 오프셋과 실제가 다르다. 실제 값을 남기고 0이 되지 않아야 한다."""
-    sheet = offset_sheet(ready_config, table, 1)
-    assert all(t["actual_r_offset_mm"] != 0 and t["actual_r_offset_mm"] * t["offset"] > 0 for t in sheet if t["axis"] == "r")
-    assert all(t["actual_lateral_offset_mm"] * t["offset"] > 0 for t in sheet if t["axis"] == "lateral")
-    assert all(t["actual_r_offset_mm"] == 0 and t["actual_lateral_offset_mm"] == 0 for t in sheet if t["axis"] == "j5")
+@pytest.mark.parametrize(("outcomes", "verdict"), [([True] * 3, None), ([True] * 4, "pass"), ([False, True, False], "fail"), ([True, False, True, True], None)])
+def test_variant_verdict_stops_early(outcomes, verdict):
+    assert variant_verdict(outcomes) == verdict
 
 
-def test_offset_pick_uses_offset_command(ready_config, table, tmp_path):
-    """놓은 자세와 집는 자세가 실제로 달라야 허용 오차 시험이다."""
-    driver, arm, ledger = make(ready_config, table, tmp_path)
-    trial = next(t for t in offset_sheet(ready_config, table, 1) if t["axis"] == "lateral")
-    run_replay(arm, FakeCamera(), ledger, [trial], lambda t: Outcome(True), table, "stored", lambda t: None)
-    j1_values = {q5[0] for q5, _, _ in driver.writes if q5 != ready_config.park}
-    assert {trial["j1"], trial["pick_j1"]} <= j1_values
+def _states(variants, status="pass"):
+    return {v["variant_id"]: {"status": status} for v in variants}
+
+
+def test_tolerance_all_pass_takes_smallest_step(ready_config, table):
+    variants = tolerance_variants(ready_config, table)
+    result = compute_tolerance(variants, _states(variants), "verified")
+    assert (result["r"]["tol_cmd"], result["lateral"]["tol_cmd"], result["j5"]["tol_cmd"]) == (3.951, 2.165, 10.0)
+    assert all(axis["usable"] and axis["confirmed"] for axis in result.values())
+
+
+def test_tolerance_failure_gives_zero_and_unusable(ready_config, table):
+    variants = tolerance_variants(ready_config, table)
+    states = _states(variants)
+    states["c1-j5-"] = {"status": "fail"}
+    result = compute_tolerance(variants, states, "verified")
+    assert result["j5"]["tol_cmd"] == 0.0 and not result["j5"]["usable"] and result["j5"]["confirmed"]
+    assert result["r"]["usable"]
+
+
+def test_tolerance_incomplete_or_missing_is_unconfirmed(ready_config, table):
+    variants = tolerance_variants(ready_config, table)
+    states = _states(variants)
+    states["c0-r+"] = {"status": "incomplete", "reason": "안전상 미측정"}
+    del states["c2-lateral-"]
+    result = compute_tolerance(variants, states, "verified")
+    assert result["r"]["confirmed"] is False and result["r"]["tol_cmd"] is None and not result["r"]["usable"]
+    assert result["r"]["incomplete"] == {"c0-r+": "안전상 미측정"}
+    assert result["lateral"]["incomplete"] == {"c2-lateral-": "기록 없음"} and not result["lateral"]["confirmed"]
+    assert result["j5"]["confirmed"]
+
+
+def test_tolerance_unverified_transfer_is_unusable(ready_config, table):
+    variants = tolerance_variants(ready_config, table)
+    result = compute_tolerance(variants, _states(variants), "unverified")
+    assert not any(axis["usable"] for axis in result.values())
+    assert all(axis["confirmed"] for axis in result.values())
+    with pytest.raises(ValueError):
+        compute_tolerance(variants, _states(variants), "maybe")

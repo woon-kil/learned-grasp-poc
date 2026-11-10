@@ -27,10 +27,13 @@ G0_REQUIRED_SUCCESSES = 24
 G0_REQUIRED_TOTAL = 30
 G0E_MAX_SECONDS_PER_SAMPLE = 90.0
 TOL_MIN_SUCCESSES = 4
+TOL_MAX_FAILURES = 2
 TOL_TRIALS = 5
-R_OFFSETS_MM = (3, 6, 10)
-LATERAL_OFFSETS_MM = (3, 6, 10)
-J5_OFFSETS_DEG = (10, 20)
+# G0d 1차(docs/261109-2129-G0d-재설계-플랜.md v9). 셀은 r_index, J1·J5는 범위 가운데. 축·부호마다 가장 작은 서로 다른 자세 1단계.
+TOL_CELLS = (1, 4, 7)
+TOL_AXES = ("r", "lateral", "j5")
+TOL_J1_STEP_DEG = 1
+TOL_J5_STEP_DEG = 10
 
 
 @dataclass(frozen=True)
@@ -85,69 +88,97 @@ def dryrun_sheet(config: Config, table: PoseTable) -> list[dict]:
     ]
 
 
-def _offset_index(table: PoseTable, r_index: int, offset_mm: float) -> int:
-    """오프셋에 가장 가까운 표 항목. 표 간격 때문에 기준 항목이나 반대쪽으로 되돌아가면 지정 방향의 다음 항목을 쓴다."""
-    step = 1 if offset_mm > 0 else -1
-    index = table.nearest_index(table.entries[r_index].r_mm + offset_mm)
-    if (index - r_index) * step <= 0:
-        index = r_index + step
-    if not 0 <= index < len(table.entries):
-        raise ValueError(f"표 끝을 넘는 오프셋: r_index={r_index}, offset={offset_mm}")
-    return index
-
-
-def offset_sheet(config: Config, table: PoseTable, seed: int, cells: int = 3) -> list[dict]:
-    """G0d. 놓은 자세에서 명령만 어긋나게 해 허용 오차를 잰다. 오프셋은 모델 좌표다."""
-    rng = random.Random(seed)
-    count = len(table.entries)
-    j1_mid = _levels(*config.j1_range, 3)[1]
-    j5_mid = _levels(*config.j5_range, 3)[1]
-    centers = [count * band // cells + (count // cells) // 2 for band in range(cells)]
-    trials = []
-    for cell, r_index in enumerate(centers):
+def tolerance_variants(config: Config, table: PoseTable) -> list[dict]:
+    """G0d 1차 18변형. 놓기는 기준 자세 P, 집기는 P+δ다. 오프셋은 표 모델 값이고 물리 허용 오차가 아니다."""
+    j1 = _levels(*config.j1_range, 3)[1]
+    j5 = _levels(*config.j5_range, 3)[1]
+    variants = []
+    for cell, r_index in enumerate(TOL_CELLS):
         base = table.entries[r_index].r_mm
-        mm_per_j1_deg = math.radians(1.0) * base
-        variants = [("r", sign * value, _offset_index(table, r_index, sign * value), j1_mid, j5_mid) for value in R_OFFSETS_MM for sign in (1, -1)]
-        variants += [
-            ("lateral", sign * value, r_index, j1_mid + sign * max(1, round(value / mm_per_j1_deg)), j5_mid)
-            for value in LATERAL_OFFSETS_MM
-            for sign in (1, -1)
-        ]
-        variants += [("j5", sign * value, r_index, j1_mid, j5_mid + sign * value) for value in J5_OFFSETS_DEG for sign in (1, -1)]
-        for axis, offset, pick_index, pick_j1, pick_j5 in variants:
-            actual_r = table.entries[pick_index].r_mm - base
-            for rep in range(TOL_TRIALS):
-                trials.append(
+        for axis in TOL_AXES:
+            for sign in (-1, 1):
+                pick = {"pick_r_index": r_index, "pick_j1": j1, "pick_j5": j5}
+                if axis == "r":
+                    pick["pick_r_index"] = r_index + sign
+                    if not 0 <= pick["pick_r_index"] < len(table.entries):
+                        raise ValueError(f"표 끝을 넘는 r 단계: r_index={r_index}")
+                    value = table.entries[pick["pick_r_index"]].r_mm - base
+                elif axis == "lateral":
+                    pick["pick_j1"] = j1 + sign * TOL_J1_STEP_DEG
+                    value = base * math.radians(sign * TOL_J1_STEP_DEG)
+                else:
+                    pick["pick_j5"] = j5 + sign * TOL_J5_STEP_DEG
+                    value = float(sign * TOL_J5_STEP_DEG)
+                if not (config.j1_range[0] <= pick["pick_j1"] <= config.j1_range[1] and config.j5_range[0] <= pick["pick_j5"] <= config.j5_range[1]):
+                    raise ValueError(f"범위를 넘는 변형: {axis}{sign:+d} 셀 {cell}")
+                variants.append(
                     {
-                        "trial_id": f"c{cell}-{axis}{offset:+d}-t{rep}", "cell": cell, "axis": axis, "offset": offset,
-                        "actual_r_offset_mm": round(actual_r, 3),
-                        "actual_lateral_offset_mm": round((pick_j1 - j1_mid) * mm_per_j1_deg, 3),
-                        "r_index": r_index, "j1": j1_mid, "j5": j5_mid, "pick_r_index": pick_index, "pick_j1": pick_j1, "pick_j5": pick_j5,
+                        "variant_id": f"c{cell}-{axis}{'+' if sign > 0 else '-'}", "cell": cell, "axis": axis, "sign": sign,
+                        "model_offset": round(value, 3), "r_index": r_index, "j1": j1, "j5": j5, **pick,
                     }
                 )
-    rng.shuffle(trials)
-    return trials
+    return variants
 
 
-def compute_tolerance(records: list[dict], axis: str, offsets: tuple[int, ...]) -> int:
-    """셀·부호별로 작은 오프셋부터 연속으로 기준을 넘은 최대값을 구하고 그중 최솟값을 쓴다.
+def tolerance_sheet(config: Config, table: PoseTable, seed: int) -> list[dict]:
+    """변형마다 최대 5회 자리를 미리 만든다. 회차마다 변형 순서를 시드로 섞어 교차한다.
 
-    작은 오프셋에서 실패하면 큰 오프셋이 성공해도 인정하지 않는다. 모두 실패하면 0이고, 그러면 G1을 통과할 수 없다.
+    결과를 본 뒤 순서를 바꾸지 않는다. 종결된 변형의 남은 자리는 실행기가 건너뛴다.
     """
-    cells = sorted({record["cell"] for record in records if record.get("axis") == axis})
-    if not cells:
-        raise ValueError(f"{axis} 축 기록이 없다")
-    tolerances = []
-    for cell in cells:
-        for sign in (1, -1):
-            best = 0
-            for value in sorted(offsets):
-                matching = [r for r in records if r.get("axis") == axis and r["cell"] == cell and r["offset"] == sign * value]
-                if sum(1 for r in matching if r["success"]) < TOL_MIN_SUCCESSES:
-                    break
-                best = value
-            tolerances.append(best)
-    return min(tolerances)
+    rng = random.Random(seed)
+    variants = tolerance_variants(config, table)
+    sheet = []
+    for round_index in range(TOL_TRIALS):
+        order = list(variants)
+        rng.shuffle(order)
+        sheet += [{**variant, "trial_id": f"{variant['variant_id']}-t{round_index}", "round": round_index} for variant in order]
+    return sheet
+
+
+def variant_verdict(outcomes: list[bool]) -> str | None:
+    """4회 성공이면 통과, 2회 실패면 미달. 그 전에는 None이다. 5회 고정·4성공 기준과 같은 결론을 낸다."""
+    if sum(outcomes) >= TOL_MIN_SUCCESSES:
+        return "pass"
+    if len(outcomes) - sum(outcomes) >= TOL_MAX_FAILURES:
+        return "fail"
+    if len(outcomes) >= TOL_TRIALS:
+        raise ValueError(f"5회를 넘어 판정이 없다: {outcomes}")
+    return None
+
+
+def compute_tolerance(variants: list[dict], states: dict[str, dict], transfer: str) -> dict[str, dict]:
+    """시험표 기준 축별 집계. states[variant_id] = {"status": pass|fail|incomplete, "reason": ...}.
+
+    기록에 없는 변형도 미완료로 센다. 미완료가 있는 축은 confirmed=false다. 미달이 있으면 tol_cmd=0이고 G1을 통과할 수 없다.
+    transfer가 verified가 아니면 usable=false다.
+    """
+    if transfer not in ("verified", "unverified"):
+        raise ValueError(transfer)
+    result = {}
+    for axis in TOL_AXES:
+        members = [v for v in variants if v["axis"] == axis]
+        status = {v["variant_id"]: states.get(v["variant_id"], {"status": "incomplete", "reason": "기록 없음"}) for v in members}
+        incomplete = {vid: s.get("reason", "") for vid, s in status.items() if s["status"] not in ("pass", "fail")}
+        failed = sorted(vid for vid, s in status.items() if s["status"] == "fail")
+        steps = sorted(abs(v["model_offset"]) for v in members)
+        if failed:
+            tol = 0.0
+        elif incomplete:
+            tol = None
+        else:
+            tol = steps[0]
+        confirmed = not incomplete
+        result[axis] = {
+            "tol_cmd": tol,
+            "unit": "deg" if axis == "j5" else "mm",
+            "tested_steps": steps,
+            "failed": failed,
+            "incomplete": incomplete,
+            "confirmed": confirmed,
+            "transfer": transfer,
+            "usable": bool(confirmed and not failed and transfer == "verified"),
+        }
+    return result
 
 
 def _pose(kind: str, trial: dict, prefix: str = "") -> Pose:
@@ -322,7 +353,7 @@ def main() -> None:
     if args.gate == "G0a":
         sheet = dryrun_sheet(config, table)
     elif args.gate == "G0d":
-        sheet = offset_sheet(config, table, args.seed)
+        sheet = tolerance_sheet(config, table, args.seed)
     else:
         sheet = replay_sheet(config, table, args.seed)
     text = json.dumps(sheet, ensure_ascii=False, indent=1)
