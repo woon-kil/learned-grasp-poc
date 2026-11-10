@@ -47,3 +47,5 @@ uv run python -m learned_grasp.g0_runner sheet --gate G0b --seed 1
 ## 검토 방식
 
 코드·플랜 검토는 Codex 대신 **advisor**로 한다(사용자 결정 2026-11-10). advisor는 같은 Claude 계열이라 교차 모델 검토가 아니다. 검토 기록에 이 사실을 적고, 실기 쓰기 안전 경로 코드와 판정값 변경은 advisor 지적을 모두 반영한 뒤에만 승인 요청으로 넘어간다. 사용자가 Codex를 다시 지정하면 그때 쓴다.
+
+외부 자료(제조사 문서·소스·표 이미지)는 `data/refs/`에 복사해 두고 문서에는 그 프로젝트 상대 경로와 원본 위치를 적는다. 사용자 Downloads 같은 개인 경로를 출처로 적지 않는다. `data/`는 gitignore라 제조사 파일 비커밋 규칙과 맞는다(사용자 2026-11-10).
