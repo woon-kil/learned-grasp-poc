@@ -69,7 +69,13 @@
 
 ### G0d 허용 오차
 
-`g0_runner sheet --gate G0d`. 판정은 없고 `tol_r`, `tol_lateral`, `tol_ψ`를 산출한다. 240회라 위험 R1에 따라 G0a·G0b 주기를 잰 뒤 범위를 다시 정한다. r 오프셋은 표 항목으로만 만들 수 있어 명목값과 다르다. 해석에는 기록된 `actual_r_offset_mm`를 쓴다.
+정본: `docs/261109-2129-G0d-재설계-플랜.md` v9. 값은 **명령 공간** `tol_cmd_r`, `tol_cmd_lateral`, `tol_cmd_psi`이고 물리 허용 오차가 아니다.
+
+- **준비(쓰기 0건)**: 윗면 마커 id 7 부착, 판정 계약 4 합격(`docs/261110-1034-G0d-판정-계약4-결과.md`). 시험표는 `g0_runner sheet --gate G0d --seed 1 --out results/G0d/sheet.json`으로 만들어 실행 전에 커밋한다. 승인 파일에 `close_limit_s`(닫힘 한도)와 `release_s`(미파지 답 뒤 `hover` 이동·개방 실측 시간)를 넣는다. 기본값은 없다. `max_writes`는 `scripts/g0d_write_budget.py` 값(G0d-0 521, G0d 1차 상한 1775)에 여유를 더해 정한다.
+- **사람 답**: 실행기가 `question.json`을 쓰면 감독자가 전원 차단 위치의 터미널에서 `session answer --session <승인>`으로 답한다. 하강 전 확인은 `y`/`n`, 판정 실패는 `miss`/`held`/`unknown`, 배치 재적재는 `y`/`n`. 마감을 넘긴 답은 받지 않는다. 답을 자동화하지 않는다.
+- **`G0d-0`**(`session natural-spread`): 셀 r_index 1·4·7, J1·J5 90. 일반 경로 24회 뒤 경로 비교 18회(셀마다 복귀·일반 교차 3번), 합 42회. 시작 사진에서 바깥쪽 마커 id 0, 1 기준을 고정하고 사진마다 2화소를 넘으면 멈춘다. 결과 `spread.json`: 셀별 기준(일반 경로 다음 배치 중앙값), 흩어짐(편차 최대), `transfer`(복귀 다음 같은 셀 배치가 흩어짐을 넘으면 `unverified`), 집기 성공 사진 노란 화소 최대. **집기 실패 1건 또는 노란 화소 52 초과면 G0d 1차로 가지 않는다.**
+- **G0d 1차**(`session tolerance --sheet results/G0d/sheet.json --spread runs/G0d-0/spread.json`): 18변형, 회차마다 시드 고정 교차, 4성공 통과·2실패 미달. 배치 필터는 `spread.json` 값이다. 한 시도: P 놓기→배치 확인→P+δ `hover`에서 하강 전 확인(여기서 시도 ID 소비)→집기→판정→실패면 쓰기 없이 답 대기, 성공이면 P+δ에 도로 놓고 P에서 하강 전 확인 뒤 재집기. 결과 `tolerance.json`.
+- **멈춤**: 판정 실패 뒤 `held`·`unknown`·무응답·늦은 답, 복귀 재집기 하강 거부, 카메라 기준 이동은 추가 쓰기 없이 끝난다. 닫힘 한도가 만료되면 모든 쓰기를 막는다. 그리퍼는 닫힌 채 팔이 서 있으니 실행 전에 합의한 절차를 따른다. 받침·전원 차단 기록은 실기 승인 전에 다시 정한다.
 
 ### G0e 운영
 
