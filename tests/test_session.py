@@ -642,7 +642,7 @@ def test_grip_max_steps_up_by_five_then_opens_and_returns(ready_config, tmp_path
     # park, hover, grasp(열림) | 닫기, +5, +10 | 열기 | hover, park
     assert grips == [ready_config.open_sdk] * 3 + [close, close + 5, close + 10] + [ready_config.open_sdk] * 3
     assert len(fake.writes) == 9 and arm.pose == PARK_POSE and not arm.holding
-    assert [item["step"] for item in ledger] == ["open", "close", "level", "level", "end"]
+    assert [item["step"] for item in ledger] == ["open", "close", "close_settled", "level", "level", "end"]
     assert ledger[-1]["reason"] == "max_sdk 도달"
     assert lines[0] == '{"arrived": "open"}' and lines[-1] == '{"end": "max_sdk 도달"}'
 
@@ -706,3 +706,12 @@ def test_grip_max_requires_gate_flag(ready_config, tmp_path):
         run_grip_max(arm, ready_config, signal, tmp_path / "grip_stop", tmp_path, 4, max_sdk=ready_config.close_sdk + 10,
                      sleep=lambda _: signal.write_text("1"), clock=lambda: 0.0, log=lambda *a, **k: None)
     assert max(w[1] for w in fake.writes) == ready_config.close_sdk  # 닫기까지만 나갔다
+
+
+def test_grip_max_does_not_step_up_when_already_lagging_at_close_sdk(ready_config, tmp_path):
+    close = ready_config.close_sdk
+    fake = LaggingFake(limit=close - 5)  # 빈 손인데 close_sdk에서 이미 판독이 5도 뒤진다(손가락 사이에 무엇이 있다)
+    arm, fake, lines, ledger = _grip_run(ready_config, tmp_path, fake=fake, max_sdk=close + 20)
+    assert max(w[1] for w in fake.writes) == close  # 레벨을 올리지 않았다
+    assert [w[1] for w in fake.writes][-3:] == [ready_config.open_sdk] * 3 and arm.pose == PARK_POSE
+    assert ledger[-1]["reason"].startswith("close_sdk에서 이미 판독이 뒤짐")

@@ -382,7 +382,7 @@ def run_dabai_view(
     arm.goto(PARK_POSE)
 
 
-GRIP_MAX_WAIT_S = 90.0
+GRIP_MAX_WAIT_S = 300.0  # H2-A 실측: 사람이 자를 대고 읽고 손을 빼 답하는 데 약 211초
 
 
 def run_grip_max(
@@ -433,15 +433,19 @@ def run_grip_max(
             reason = "정지 파일"
         else:
             arm.set_grip("close")
-            base = servo6()
-            record(step="close", command=arm.grip, servo6=base)
-            if base is None:
-                reason = "서보 판독 없음"
-            elif _wait_dabai_signal(signal, f"close:{arm.grip}", wait_s, sleep, clock, log, stop):
+            record(step="close", command=arm.grip, servo6=servo6())
+            if _wait_dabai_signal(signal, f"close:{arm.grip}", wait_s, sleep, clock, log, stop):
                 reason = "정지 파일"
             else:
-                base_lag = arm.grip - base
-                while arm.grip + GRIP_SWEEP_STEP <= max_sdk:
+                # 기준 지연은 서보가 자리 잡은 뒤(읽기 시간 뒤) 다시 읽어 얻는다. 닫은 직후 값은 아직 가는 중일 수 있다.
+                settled = servo6()
+                record(step="close_settled", command=arm.grip, servo6=settled)
+                base_lag = None if settled is None else arm.grip - settled
+                if base_lag is None:
+                    reason = "서보 판독 없음"
+                elif base_lag > config.motion.arrival_tol_deg:
+                    reason = "close_sdk에서 이미 판독이 뒤짐(손가락 사이에 물체가 있을 수 있다)"
+                while reason == "max_sdk 도달" and arm.grip + GRIP_SWEEP_STEP <= max_sdk:
                     arm.set_grip(f"level:{arm.grip + GRIP_SWEEP_STEP}")
                     reading = servo6()
                     lag = None if reading is None else arm.grip - reading
