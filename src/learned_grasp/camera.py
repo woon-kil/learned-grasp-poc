@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import select
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+from learned_grasp.lineio import LineReader
 
 
 @dataclass(frozen=True)
@@ -69,10 +70,13 @@ class P620Camera:
         self._read(timeout_s=90.0)
 
     def _read(self, timeout_s: float) -> dict:
-        if not select.select([self.process.stdout], [], [], timeout_s)[0]:
+        if not hasattr(self, "reader"):
+            self.reader = LineReader(self.process.stdout)
+        try:
+            line = self.reader.readline(timeout_s)
+        except TimeoutError:
             self.process.kill()
-            raise ConnectionError("카메라 서버가 응답하지 않았다")
-        line = self.process.stdout.readline()
+            raise ConnectionError("카메라 서버가 응답하지 않았다") from None
         if not line:
             raise ConnectionError("카메라 서버 연결이 끊겼다")
         response = json.loads(line)

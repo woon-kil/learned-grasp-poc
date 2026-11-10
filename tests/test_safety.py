@@ -271,3 +271,86 @@ def test_arrival_read_none_stops_further_writes(ready_config, table):
     with pytest.raises(SafetyViolation):
         arm.goto(hover())
     assert len(driver.writes) == 1
+
+
+def _watched(ready_config, table, driver, limit_s, events):
+    from learned_grasp.arm import CloseWatch
+
+    watch = CloseWatch(limit_s, on_expire=events.append)
+    return SafeArm(driver, SafetyGate(ready_config, table), sleep=lambda _: None, close_watch=watch), watch
+
+
+def test_close_watch_blocks_writes_after_limit(ready_config, table, driver):
+    import time
+
+    events = []
+    arm, watch = _watched(ready_config, table, driver, 0.05, events)
+    arm.goto(PARK_POSE)
+    arm.goto(hover())
+    arm.goto(grasp())
+    arm.set_grip("close")
+    time.sleep(0.15)
+    assert watch.expired and events
+    count = len(driver.writes)
+    with pytest.raises(SafetyViolation, match="만료"):
+        arm.goto(hover())
+    with pytest.raises(SafetyViolation, match="만료"):
+        arm.set_grip("open")
+    assert len(driver.writes) == count
+
+
+def test_close_watch_stops_on_open(ready_config, table, driver):
+    import time
+
+    events = []
+    arm, watch = _watched(ready_config, table, driver, 0.1, events)
+    arm.goto(PARK_POSE)
+    arm.goto(hover())
+    arm.goto(grasp())
+    arm.set_grip("close")
+    assert 0 < watch.remaining() <= 0.1
+    arm.set_grip("open")
+    time.sleep(0.2)
+    assert not watch.expired and not events and watch.remaining() is None
+    arm.goto(hover())
+
+
+def test_close_watch_expires_while_remote_call_is_stuck(ready_config, table):
+    """원격 호출이 멈춰 있어도 만료는 따로 나고, 풀린 뒤 다음 쓰기는 거부된다."""
+    import threading
+    import time
+
+    release = threading.Event()
+
+    class Stuck(FakeArm):
+        stall = False
+
+        def write6(self, q5, grip, time_ms):
+            if self.stall:
+                release.wait(5)
+            super().write6(q5, grip, time_ms)
+
+    stuck = Stuck()
+    events = []
+    arm, watch = _watched(ready_config, table, stuck, 0.05, events)
+    arm.goto(PARK_POSE)
+    arm.goto(hover())
+    arm.goto(grasp())
+    arm.set_grip("close")
+    stuck.stall = True
+    worker = threading.Thread(target=arm.goto, args=(hover(),))
+    worker.start()
+    time.sleep(0.2)
+    assert worker.is_alive() and watch.expired and events
+    release.set()
+    worker.join(5)
+    stuck.stall = False
+    with pytest.raises(SafetyViolation, match="만료"):
+        arm.goto(PARK_POSE)
+
+
+def test_close_watch_needs_positive_limit():
+    from learned_grasp.arm import CloseWatch
+
+    with pytest.raises(ValueError):
+        CloseWatch(0)

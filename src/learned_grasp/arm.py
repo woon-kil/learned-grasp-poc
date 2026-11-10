@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import select
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from learned_grasp.config import Config
+from learned_grasp.lineio import LineReader
 from learned_grasp.safety import PARK_POSE, Pose, SafetyGate, SafetyViolation
 
 
@@ -55,6 +56,47 @@ def load_approval(path: Path, config: Config, now: datetime | None = None) -> Se
     return SessionApproval(raw["session_id"], raw["gate"], raw["max_writes"], hashlib.sha256(data).hexdigest())
 
 
+class CloseWatch:
+    """닫기 명령 전송부터 단조 시계로 재는 닫힘 한도. 입력·원격 호출 대기와 독립된 스레드로 만료를 표시한다.
+
+    한도는 운영 값이고 안전 보증이 아니다. 만료는 SafeArm의 추가 쓰기만 막는다. 그리퍼는 닫힌 채 팔이 서 있다.
+    값은 기본값 없이 실행 계약에서 받는다(G0d 플랜 124~126행).
+    """
+
+    def __init__(self, limit_s: float, on_expire: Callable[[str], None] = print, clock: Callable[[], float] = time.monotonic):
+        if not limit_s > 0:
+            raise ValueError("닫힘 한도는 양수다")
+        self.limit_s = limit_s
+        self.on_expire = on_expire
+        self.clock = clock
+        self.started_at: float | None = None
+        self.expired = False
+        self._cancel = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.stop()
+        self._cancel = threading.Event()
+        self.started_at = self.clock()
+        cancel = self._cancel
+        self._thread = threading.Thread(target=self._run, args=(cancel,), daemon=True)
+        self._thread.start()
+
+    def _run(self, cancel: threading.Event) -> None:
+        if not cancel.wait(self.limit_s):
+            self.expired = True
+            self.on_expire(f"닫힘 {self.limit_s:g}초 한도 만료. 추가 쓰기를 막는다. 그리퍼는 닫힌 채다")
+
+    def stop(self) -> None:
+        self._cancel.set()
+        self.started_at = None
+
+    def remaining(self) -> float | None:
+        if self.started_at is None:
+            return None
+        return self.limit_s - (self.clock() - self.started_at)
+
+
 class SafeArm:
     """게이트 통과 후에만 쓰기를 보낸다. 조회값을 목표로 쓰지 않는다."""
 
@@ -64,16 +106,23 @@ class SafeArm:
         gate: SafetyGate,
         sleep: Callable[[float], None] = time.sleep,
         start_joints: tuple[int, ...] | None = None,
+        close_watch: CloseWatch | None = None,
     ):
         self.driver = driver
         self.gate = gate
         self.sleep = sleep
         self.start_joints = start_joints
+        self.close_watch = close_watch
         self.pose: Pose | None = None
         self.grip: int = gate.config.open_sdk
         self.holding = False
 
+    def _check_watch(self) -> None:
+        if self.close_watch is not None and self.close_watch.expired:
+            raise SafetyViolation("닫힘 한도가 만료돼 추가 쓰기를 보내지 않는다. 합의한 절차를 따른다")
+
     def goto(self, target: Pose) -> None:
+        self._check_watch()
         self.gate.check_transition(self.pose, target)
         q5 = self.gate.joints(target)
         time_ms = self.gate.move_time_ms(self.pose, target, self.start_joints)
@@ -100,10 +149,15 @@ class SafeArm:
         if self.pose is None:
             raise SafetyViolation("자세를 모르는 상태에서 그리퍼를 움직이지 않는다")
         if grip != self.grip:
+            self._check_watch()
             # 팔 5축을 더 짧은 시간으로 재전송하지 않도록 6번 서보만 쓴다.
             time_ms = self.gate.config.motion.grip_time_ms
+            if self.close_watch is not None and action == "close":
+                self.close_watch.start()
             self.driver.write_grip(grip, time_ms)
             self.sleep((time_ms + self.gate.config.motion.settle_ms) / 1000.0)
+            if self.close_watch is not None and action == "open":
+                self.close_watch.stop()
         self.grip = grip
         self.holding = action == "close"
 
@@ -154,11 +208,13 @@ class RemoteArm:
     def _call(self, request: dict, timeout_s: float = 10.0) -> dict:
         self.process.stdin.write(json.dumps(request) + "\n")
         self.process.stdin.flush()
-        ready, _, _ = select.select([self.process.stdout], [], [], timeout_s)
-        if not ready:
+        if not hasattr(self, "reader"):
+            self.reader = LineReader(self.process.stdout)
+        try:
+            line = self.reader.readline(timeout_s)
+        except TimeoutError:
             self.process.kill()
-            raise ConnectionError(f"Jetson 서버가 {timeout_s:g}초 안에 응답하지 않았다. 이미 보낸 이동은 멈추지 않으니 감독자가 확인한다")
-        line = self.process.stdout.readline()
+            raise ConnectionError(f"Jetson 서버가 {timeout_s:g}초 안에 응답하지 않았다. 이미 보낸 이동은 멈추지 않으니 감독자가 확인한다") from None
         if not line:
             raise ConnectionError("Jetson 서버 연결이 끊겼다")
         response = json.loads(line)
@@ -193,4 +249,4 @@ class RemoteArm:
                 self.process.kill()
 
 
-__all__ = ["ApprovalError", "ArmDriver", "FakeArm", "PARK_POSE", "RemoteArm", "SafeArm", "SessionApproval", "load_approval"]
+__all__ = ["ApprovalError", "ArmDriver", "CloseWatch", "FakeArm", "PARK_POSE", "RemoteArm", "SafeArm", "SessionApproval", "load_approval"]

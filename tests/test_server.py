@@ -299,3 +299,29 @@ def test_remote_arm_requires_host_from_environment(monkeypatch):
     monkeypatch.delenv("LG_JETSON_HOST", raising=False)
     with pytest.raises(ApprovalError):
         RemoteArm(APPROVAL)
+
+
+def test_client_times_out_on_partial_line(tmp_path):
+    """줄 끝 없이 일부만 온 응답에서 readline처럼 무기한 기다리지 않는다."""
+    arm = RemoteArm.__new__(RemoteArm)
+    arm.process = subprocess.Popen(
+        [sys.executable, "-c", "import sys, time; sys.stdout.write('{\"ok\": tr'); sys.stdout.flush(); time.sleep(30)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    with pytest.raises(ConnectionError, match="응답하지"):
+        arm._call({"op": "read"}, timeout_s=0.3)
+    arm.close()
+    assert arm.process.poll() is not None
+
+
+def test_camera_times_out_on_partial_line():
+    from learned_grasp.camera import P620Camera
+
+    camera = P620Camera.__new__(P620Camera)
+    camera.process = subprocess.Popen(
+        [sys.executable, "-c", "import sys, time; sys.stdout.write('{\"ok\"'); sys.stdout.flush(); time.sleep(30)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    with pytest.raises(ConnectionError, match="응답하지"):
+        camera._read(timeout_s=0.3)
+    assert camera.process.wait(timeout=5) is not None
