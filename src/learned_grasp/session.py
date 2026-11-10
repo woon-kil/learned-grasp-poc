@@ -7,6 +7,9 @@
   python -m learned_grasp.session dryrun  --session runs/G0a-1/approval.json --start-confirmed
   python -m learned_grasp.session replay  --session runs/G0b-1/approval.json --sheet runs/G0b-1/sheet.json --mode stored --start-confirmed
   python -m learned_grasp.session ready   --session runs/G0b-1/approval.json
+  python -m learned_grasp.session natural-spread --session runs/G0d-0/approval.json --start-confirmed
+  python -m learned_grasp.session tolerance --session runs/G0d-1/approval.json --sheet results/G0d/sheet.json --spread runs/G0d-0/spread.json --start-confirmed
+  python -m learned_grasp.session answer  --session runs/G0d-0/approval.json   (다른 터미널, 실행 중 질문에 답한다)
 
 대화형 입력이 없다. 감독자는 전원 차단으로 멈춘다. --start-confirmed는 사용자가 빈 그리퍼, 시작 자세,
 park까지의 경로를 눈으로 확인했다고 답한 뒤에만 붙인다. 높이 탐색은 앞 단계의 관찰 통과 기록이 있어야 다음 단계로 간다.
@@ -21,11 +24,12 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
-from learned_grasp.arm import RemoteArm, SafeArm, SessionApproval, load_approval
+from learned_grasp.answers import FileAnswers, answer_once
+from learned_grasp.arm import CloseWatch, RemoteArm, SafeArm, SessionApproval, load_approval
 from learned_grasp.attempts import AttemptLedger
 from learned_grasp.camera import P620Camera
 from learned_grasp.config import Config, load_config
-from learned_grasp.g0_runner import Outcome, dryrun_sheet, run_dryrun, run_replay
+from learned_grasp.g0_runner import Outcome, compute_tolerance, dryrun_sheet, run_dryrun, run_replay, tolerance_variants
 from learned_grasp.pose_table import PoseTable, generate
 from learned_grasp.safety import GRASP, HOVER, PARK_POSE, Pose, SafetyGate, SafetyViolation
 
@@ -334,9 +338,74 @@ def _driver(approval: SessionApproval, used: int) -> RemoteArm:
     return RemoteArm(limited)
 
 
+G0D_COMMANDS = ("natural-spread", "tolerance")
+
+
+def g0d_limits(session: Path) -> tuple[float, float]:
+    """닫힘 한도와 정상 해제 시간. 실측으로 승인 파일에 고정한다. 기본값을 두지 않는다(G0d 플랜 124~126행)."""
+    raw = json.loads(Path(session).read_text(encoding="utf-8"))
+    values = []
+    for key in ("close_limit_s", "release_s"):
+        value = raw.get(key)
+        if type(value) not in (int, float) or value <= 0:
+            raise SystemExit(f"G0d 승인 파일에 양수 {key}가 없다")
+        values.append(float(value))
+    if values[1] >= values[0]:
+        raise SystemExit("release_s가 close_limit_s보다 작아야 답할 시간이 남는다")
+    return values[0], values[1]
+
+
+def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder: Path, session_id: str, release_s: float, sheet_path: Path | None, spread_path: Path | None) -> None:
+    from learned_grasp.tolerance import G0dContext, StopSession, filter_from_spread, run_natural_spread, run_tolerance, spread_sheet, summarize_spread
+    from learned_grasp.top_marker import Placement, TopMarker
+
+    marker = TopMarker()  # OpenCV 버전이 다르면 쓰기 전에 멈춘다
+    spread = None
+    if command == "tolerance":
+        if sheet_path is None or spread_path is None:
+            raise SystemExit("tolerance는 --sheet와 --spread가 필요하다")
+        spread = json.loads(spread_path.read_text(encoding="utf-8"))
+        if not (spread.get("complete") and spread.get("failures") == 0 and spread.get("yellow_ok")):
+            raise SystemExit("G0d-0이 완결·무실패·노란 화소 기준을 채우지 않아 G0d 1차로 가지 않는다")
+    camera = P620Camera(f"runs/{session_id}/frames")
+    try:
+        if spread is None:
+            camera.snapshot("reference")
+            reference = marker.measure(camera.fetch("reference")).outer
+        else:
+            reference = {int(k): tuple(v) for k, v in spread["reference"].items()}
+        ctx = G0dContext(
+            arm=arm, camera=camera, ledger=AttemptLedger(folder / ("spread.jsonl" if spread is None else "tolerance.jsonl")), table=table,
+            observer=make_pick_observer(camera), marker=marker, placement=Placement(reference), ask=FileAnswers(folder),
+            load_block=make_block_loader(arm, folder / "block_ready"), release_s=release_s,
+            placement_filter=None if spread is None else filter_from_spread(spread),
+        )
+        try:
+            if spread is None:
+                complete = False
+                try:
+                    run_natural_spread(ctx, spread_sheet(config, table))
+                    complete = True
+                finally:
+                    summary = summarize_spread(ctx.ledger.records()) | {"complete": complete, "reference": {str(k): list(v) for k, v in reference.items()}, "counters": ctx.counters}
+                    (folder / "spread.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
+                    print(json.dumps(summary, ensure_ascii=False))
+            else:
+                sheet = json.loads(sheet_path.read_text(encoding="utf-8"))
+                states = run_tolerance(ctx, sheet)
+                result = compute_tolerance(tolerance_variants(config, table), states, spread["transfer"]) | {"counters": ctx.counters}
+                (folder / "tolerance.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+                print(json.dumps(result, ensure_ascii=False))
+        except StopSession as error:
+            raise SystemExit(f"추가 쓰기 없이 멈췄다: {error}") from error
+    finally:
+        camera.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", *G0D_COMMANDS, "answer"])
+    parser.add_argument("--spread", type=Path)
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--r-index", type=int)
     parser.add_argument("--sheet", type=Path)
@@ -350,6 +419,10 @@ def main() -> None:
     parser.add_argument("--ok", action="store_true")
     parser.add_argument("--note", default="")
     args = parser.parse_args()
+    if args.command == "answer":
+        # 실행 중인 세션 옆 터미널에서 쓴다. 잠금과 드라이버를 잡지 않는다.
+        print(answer_once(args.session.parent))
+        return
     _load_env()
     config = load_config(args.config)
     approval = load_approval(args.session, config)
@@ -378,13 +451,14 @@ def main() -> None:
         require_site_folder(folder, args.r_index)
     if args.command == "carry-test" and args.attempt is None:
         raise SystemExit("--attempt가 필요하다")
-    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check") and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", *G0D_COMMANDS) and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command in ("ladder", "close-check"):
         require_previous_observation(folder, args.z_offset)
         config = ladder_config(config, args.z_offset)
     if args.command in ("fit", "grip-test"):
         config = fit_config(config, args.z_mm)
+    limits = g0d_limits(args.session) if args.command in G0D_COMMANDS else None
     table = generate(config.table)
     driver = _driver(approval, used)
     try:
@@ -392,7 +466,8 @@ def main() -> None:
             print(json.dumps(driver.read(), ensure_ascii=False))
             return
         start = read_start_joints(driver, folder)
-        arm = SafeArm(CountingDriver(driver, counter, approval.max_writes), SafetyGate(config, table), start_joints=start)
+        watch = None if limits is None else CloseWatch(limits[0])
+        arm = SafeArm(CountingDriver(driver, counter, approval.max_writes), SafetyGate(config, table), start_joints=start, close_watch=watch)
         loader = make_block_loader(arm, folder / "block_ready")
         if args.command == "fit":
             run_fit(arm, config, table, loader, min(args.hold_sec, 60.0))
@@ -416,6 +491,8 @@ def main() -> None:
                 )
             finally:
                 camera.close()
+        elif args.command in G0D_COMMANDS:
+            run_g0d(args.command, arm, config, table, folder, approval.session_id, limits[1], args.sheet, args.spread)
         elif args.command == "ladder":
             run_ladder(arm, AttemptLedger(folder / f"ladder-z{args.z_offset:g}.jsonl"), config, table, min(args.hold_sec, 60.0))
         else:

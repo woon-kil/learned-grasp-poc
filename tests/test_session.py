@@ -449,3 +449,21 @@ def test_start_read_none_refuses_before_any_write(tmp_path):
 
     with pytest.raises(SafetyViolation, match="시작 조회 실패"):
         read_start_joints(NoneRead(), tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("fields", "ok"),
+    [({"close_limit_s": 30, "release_s": 8}, True), ({"release_s": 8}, False), ({"close_limit_s": 30, "release_s": 0}, False), ({"close_limit_s": 10, "release_s": 10}, False), ({"close_limit_s": "30", "release_s": 8}, False)],
+)
+def test_g0d_limits_have_no_default(tmp_path, fields, ok):
+    import json
+
+    from learned_grasp.session import g0d_limits
+
+    path = tmp_path / "approval.json"
+    path.write_text(json.dumps(fields))
+    if ok:
+        assert g0d_limits(path) == (30.0, 8.0)
+    else:
+        with pytest.raises(SystemExit):
+            g0d_limits(path)
