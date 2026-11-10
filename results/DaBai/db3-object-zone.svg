@@ -14,10 +14,10 @@
   <text x="450" y="262" font-size="15" font-weight="bold" fill="#a00" text-anchor="middle">손끝 금지 구역 (y 110~170 mm)</text>
   <text x="450" y="280" font-size="12" fill="#a00" text-anchor="middle">모델 TCP y≈139 mm ± 여유. 물체를 두지 않는다</text>
   <!-- 놓는 구역: y 175..265 mm -> cy 305..395 ; x ±100 -->
-  <rect x="350" y="305" width="200" height="90" fill="#5cb85c" fill-opacity="0.25" stroke="#2a8a2a" stroke-width="4"/>
-  <text x="450" y="420" font-size="16" font-weight="bold" fill="#1f6f1f" text-anchor="middle">물체 놓는 구역</text>
-  <text x="450" y="438" font-size="12" fill="#1f6f1f" text-anchor="middle">가로 200 mm × 세로 90 mm (y 175~265 mm)</text>
-  <text x="450" y="456" font-size="12" fill="#1f6f1f" text-anchor="middle">평평한 윗면이 이 구역을 덮게, 손끝 금지 구역과 닿지 않게</text>
+  <rect x="350" y="315" width="200" height="90" fill="#5cb85c" fill-opacity="0.25" stroke="#2a8a2a" stroke-width="4"/>
+  <text x="450" y="430" font-size="16" font-weight="bold" fill="#1f6f1f" text-anchor="middle">물체 놓는 구역</text>
+  <text x="450" y="448" font-size="12" fill="#1f6f1f" text-anchor="middle">가로 200 mm × 세로 90 mm (y 185~275 mm)</text>
+  <text x="450" y="466" font-size="12" fill="#1f6f1f" text-anchor="middle">평평한 윗면이 이 구역을 덮게, 손끝 금지 구역과 닿지 않게</text>
   <!-- DaBai 렌즈 축 바닥점: hover y=206 (cy 336), grasp y=192 (cy 322) -->
   <circle cx="450" cy="336" r="7" fill="#1f5fd1"/><text x="465" y="352" font-size="12" fill="#1f5fd1">hover 렌즈 축 y≈206</text>
   <circle cx="450" cy="322" r="7" fill="none" stroke="#1f5fd1" stroke-width="3"/><text x="465" y="332" font-size="12" fill="#1f5fd1">grasp 렌즈 축 y≈192</text>
@@ -26,7 +26,7 @@
   <!-- 설명 -->
   <g transform="translate(20,730)">
     <text x="0" y="0" font-size="15" font-weight="bold">순서</text>
-    <text x="0" y="22" font-size="13">1) 팔 park일 때 물체(평평한 책·판)를 초록 구역에 놓는다. 윗면이 평평하고 구역 전체를 덮을 것, 손끝 금지 구역은 비울 것.</text>
+    <text x="0" y="22" font-size="13">1) 팔 park일 때 책을 초록 구역에 쌓는다(1회 1권 17.5, 2회 2권 34.0, 3회 3권 50.5 mm). 윗면이 평평하고 구역 전체를 덮을 것, 손끝 금지 구역은 비울 것.</text>
     <text x="0" y="42" font-size="13">2) 물체 두께를 자로 잰다(작업대에서 윗면까지). 값만 알려 준다. 3) 시작 확인과 그리퍼 서보 온도를 알린다.</text>
     <text x="0" y="62" font-size="13" fill="#a00">팔이 움직이는 동안은 손을 넣지 않는다. 물체를 바꿀 때는 세션이 끝나 팔이 park로 돌아온 뒤에만 한다.</text>
   </g>
