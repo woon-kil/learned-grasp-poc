@@ -18,6 +18,7 @@ from learned_grasp.session import (
     PICK_CHANGE_MIN,
     PICK_YELLOW_MAX,
     descend_and_stop,
+    run_dabai_view,
     fit_config,
     run_fit,
     run_carry_test,
@@ -467,3 +468,81 @@ def test_g0d_limits_have_no_default(tmp_path, fields, ok):
     else:
         with pytest.raises(SystemExit):
             g0d_limits(path)
+
+
+def _dabai_arm(ready_config):
+    table = generate(ready_config.table)
+    fake = FakeArm()
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    return arm, fake
+
+
+def _signaling_sleep(signal, arrivals):
+    """도착 줄이 나오면 촬영이 끝났다고 보고 신호 파일을 쓰는 가짜 사람."""
+
+    def sleep(_):
+        if arrivals and not signal.exists():
+            signal.write_text("1")
+
+    return sleep
+
+
+def test_dabai_view_runs_five_writes_and_returns_to_park(ready_config, tmp_path):
+    arm, fake = _dabai_arm(ready_config)
+    signal = tmp_path / "dabai_next"
+    lines = []
+    run_dabai_view(
+        arm, signal, sleep=_signaling_sleep(signal, lines), clock=lambda: 0.0,
+        log=lambda line, **k: lines.append(line),
+    )
+    kinds = [w[0] for w in fake.writes]
+    assert len(fake.writes) == 5 and arm.pose == PARK_POSE
+    assert [w[1] for w in fake.writes] == [ready_config.open_sdk] * 5  # 닫지 않는다
+    assert kinds[0] == kinds[4] == tuple(ready_config.park) and kinds[1] == kinds[3] and kinds[1] != kinds[2]
+    assert lines == ['{"arrived": "hover"}', '{"arrived": "grasp"}'] and not signal.exists()
+
+
+def test_dabai_view_does_not_descend_without_signal(ready_config, tmp_path):
+    arm, fake = _dabai_arm(ready_config)
+    ticks = iter([0.0, 400.0])
+    with pytest.raises(NeedHuman):
+        run_dabai_view(arm, tmp_path / "dabai_next", sleep=lambda _: None, clock=lambda: next(ticks), log=lambda *a, **k: None)
+    assert len(fake.writes) == 3 and arm.pose == PARK_POSE  # park, hover, 복귀 park. grasp 없음
+
+
+def test_dabai_view_timeout_at_grasp_returns_through_hover(ready_config, tmp_path):
+    arm, fake = _dabai_arm(ready_config)
+    signal = tmp_path / "dabai_next"
+    state = {"waits": 0}
+
+    def sleep(_):
+        if state["waits"] == 0:  # 첫 대기(hover)에서만 신호를 준다
+            signal.write_text("1")
+            state["waits"] = 1
+
+    clock_values = iter([0.0, 0.0, 0.0, 400.0])  # hover 대기 시작·확인, grasp 대기 시작, grasp 상한 초과
+    with pytest.raises(NeedHuman):
+        run_dabai_view(arm, signal, sleep=sleep, clock=lambda: next(clock_values), log=lambda *a, **k: None)
+    assert len(fake.writes) == 5 and arm.pose == PARK_POSE  # park, hover, grasp, hover, park
+
+
+def test_dabai_view_ignores_stale_signal(ready_config, tmp_path):
+    arm, fake = _dabai_arm(ready_config)
+    signal = tmp_path / "dabai_next"
+    signal.write_text("이전 신호")
+    ticks = iter([0.0, 400.0])
+    with pytest.raises(NeedHuman):
+        run_dabai_view(arm, signal, sleep=lambda _: None, clock=lambda: next(ticks), log=lambda *a, **k: None)
+    assert len(fake.writes) == 3 and not signal.exists()
+
+
+def test_dabai_view_safety_violation_sends_no_recovery_writes(ready_config, tmp_path):
+    class Stuck(FakeArm):
+        def read(self):
+            return {"values": [0, 0, 0, 0, 0, 100], "status": ["sdk_return"] * 6}
+
+    stuck = Stuck()
+    arm = SafeArm(stuck, SafetyGate(ready_config, generate(ready_config.table)), sleep=lambda _: None)
+    with pytest.raises(SafetyViolation):
+        run_dabai_view(arm, tmp_path / "dabai_next", sleep=lambda _: None, clock=lambda: 0.0, log=lambda *a, **k: None)
+    assert len(stuck.writes) == 1  # 첫 park 쓰기 뒤 도착 검사 실패로 멈춘다. 자동 복귀 쓰기 없음

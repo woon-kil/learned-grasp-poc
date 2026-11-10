@@ -10,6 +10,7 @@
   python -m learned_grasp.session natural-spread --session runs/G0d-0/approval.json --start-confirmed
   python -m learned_grasp.session tolerance --session runs/G0d-1/approval.json --sheet results/G0d/sheet.json --spread runs/G0d-0/spread.json --start-confirmed
   python -m learned_grasp.session answer  --session runs/G0d-0/approval.json   (다른 터미널, 실행 중 질문에 답한다)
+  python -m learned_grasp.session dabai-view --session runs/DB-1/approval.json --start-confirmed   (도착 줄마다 촬영 뒤 `touch runs/DB-1/dabai_next`)
 
 대화형 입력이 없다. 감독자는 전원 차단으로 멈춘다. --start-confirmed는 사용자가 빈 그리퍼, 시작 자세,
 park까지의 경로를 눈으로 확인했다고 답한 뒤에만 붙인다. 높이 탐색은 앞 단계의 관찰 통과 기록이 있어야 다음 단계로 간다.
@@ -318,6 +319,47 @@ def descend_and_stop(arm: SafeArm, config: Config, table: PoseTable) -> None:
     arm.goto(Pose(GRASP, trial["r_index"], trial["j1"], trial["j5"]))
 
 
+DABAI_VIEW_R_INDEX = 4
+
+
+def _wait_dabai_signal(signal: Path, name: str, wait_s: float, sleep, clock, log) -> None:
+    signal.unlink(missing_ok=True)
+    log(json.dumps({"arrived": name}, ensure_ascii=False), flush=True)
+    end = clock() + wait_s
+    while not signal.exists():
+        if clock() >= end:
+            raise NeedHuman(f"{wait_s:g}초 안에 촬영 끝 신호를 받지 못했다({name})")
+        sleep(1.0)
+    signal.unlink(missing_ok=True)
+
+
+def run_dabai_view(arm: SafeArm, signal: Path, wait_s: float = 300.0, sleep=None, clock=None, log=print) -> None:
+    """DaBai 작업 거리 정지 촬영용. park→hover→grasp→hover→park를 열린 손으로 한 번 돈다.
+
+    hover와 grasp에 도착하면 도착 줄을 내고 signal 파일이 생길 때까지 쉰다. 촬영은 그 사이에 한다. 닫지 않는다.
+    대기 상한을 넘기면(안전 위반이 아니다) 정상 전이로 park까지 돌아온다. 안전 위반은 자동 쓰기 없이 올라간다.
+    """
+    import time as _time
+
+    sleep = sleep or _time.sleep
+    clock = clock or _time.monotonic
+    hover = Pose(HOVER, DABAI_VIEW_R_INDEX, 90, 90)
+    grasp = Pose(GRASP, DABAI_VIEW_R_INDEX, 90, 90)
+    arm.goto(PARK_POSE)
+    arm.goto(hover)
+    try:
+        _wait_dabai_signal(signal, "hover", wait_s, sleep, clock, log)
+        arm.goto(grasp)
+        _wait_dabai_signal(signal, "grasp", wait_s, sleep, clock, log)
+    except NeedHuman:
+        if arm.pose.kind == "grasp":
+            arm.goto(hover)
+        arm.goto(PARK_POSE)
+        raise
+    arm.goto(hover)
+    arm.goto(PARK_POSE)
+
+
 def _unobserved(trial: dict) -> Outcome:
     """프로그램은 무간섭을 판정하지 못한다. 이 성공은 명령 완료이고 관찰은 세션 문서에 따로 남긴다."""
     return Outcome(True, "명령 완료, 관찰은 세션 문서")
@@ -430,7 +472,7 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", *G0D_COMMANDS, "answer"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", *G0D_COMMANDS, "answer"])
     parser.add_argument("--spread", type=Path)
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--r-index", type=int)
@@ -477,7 +519,7 @@ def main() -> None:
         require_site_folder(folder, args.r_index)
     if args.command == "carry-test" and args.attempt is None:
         raise SystemExit("--attempt가 필요하다")
-    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", *G0D_COMMANDS) and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", *G0D_COMMANDS) and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command in ("ladder", "close-check"):
         require_previous_observation(folder, args.z_offset)
@@ -507,6 +549,8 @@ def main() -> None:
             run_close_check(arm, config, table, min(args.hold_sec, 60.0), args.r_index)
         elif args.command == "descend":
             descend_and_stop(arm, config, table)
+        elif args.command == "dabai-view":
+            run_dabai_view(arm, folder / "dabai_next")
         elif args.command == "park":
             arm.goto(PARK_POSE)
         elif args.command == "replay":
