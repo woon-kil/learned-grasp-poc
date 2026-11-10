@@ -41,3 +41,5 @@ uv run python -m learned_grasp.g0_runner sheet --gate G0b --seed 1
 ## 문서
 
 `docs/YYMMDD-HHMM-제목.md`. 이슈는 현상·원인·수정·교훈. 시험 결과는 실패와 미완료를 포함한다.
+
+사람이 블록·마커를 손으로 놓는 시험은 놓는 자리를 SVG 그림으로 `results/`에 만들어 촬영 안내와 함께 준다. 위치는 실제 카메라 사진을 보고 그린다(사용자 2026-11-10).
