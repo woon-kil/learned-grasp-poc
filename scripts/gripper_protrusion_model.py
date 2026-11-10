@@ -78,12 +78,13 @@ def verts(link, q):
     return (T @ np.c_[V, np.ones(len(V))].T).T[:, :3] * 1000.0  # mm
 
 
-print("grip_joint(rad)  손끝 최대 y(mm)  돌출(열림 대비)  손끝 부근 간격(mm)")
-base_tip = None
+FINGERS = ("rlink2", "llink2") if len(sys.argv) < 3 else tuple(sys.argv[2].split(","))
+print(f"손가락 링크 {FINGERS}")
+print("grip_joint(rad)  손끝 최대 y(mm)  돌출(열림 대비)  손끝 부근 간격(mm)  최낮 z(mm, 접근 +Y 단면용 아님)")
 rows = []
 for q in np.linspace(0.0, -1.6, 17):
-    R = verts("rlink3", q)
-    Lf = verts("llink3", q)
+    R = verts(FINGERS[0], q)
+    Lf = verts(FINGERS[1], q)
     tip = max(R[:, 1].max(), Lf[:, 1].max())
     near = lambda V: V[V[:, 1] >= V[:, 1].max() - 8.0]
     gap = near(R)[:, 0].min() - near(Lf)[:, 0].max()
