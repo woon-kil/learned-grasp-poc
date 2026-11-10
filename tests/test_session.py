@@ -546,3 +546,46 @@ def test_dabai_view_safety_violation_sends_no_recovery_writes(ready_config, tmp_
     with pytest.raises(SafetyViolation):
         run_dabai_view(arm, tmp_path / "dabai_next", sleep=lambda _: None, clock=lambda: 0.0, log=lambda *a, **k: None)
     assert len(stuck.writes) == 1  # 첫 park 쓰기 뒤 도착 검사 실패로 멈춘다. 자동 복귀 쓰기 없음
+
+
+def test_dabai_view_hover_only_never_goes_to_grasp(ready_config, tmp_path):
+    arm, fake = _dabai_arm(ready_config)
+    signal = tmp_path / "dabai_next"
+    lines = []
+    run_dabai_view(
+        arm, signal, sleep=_signaling_sleep(signal, lines), clock=lambda: 0.0,
+        log=lambda line, **k: lines.append(line), hover_only=True,
+    )
+    assert len(fake.writes) == 3 and arm.pose == PARK_POSE
+    assert lines == ['{"arrived": "hover"}'] and not signal.exists()
+    assert fake.writes[1][0] != fake.writes[0][0]  # hover가 park와 다른 자세
+    assert all(w[1] == ready_config.open_sdk for w in fake.writes)  # 닫지 않는다
+
+
+def test_dabai_view_hover_only_waits_for_signal_and_returns_on_timeout(ready_config, tmp_path):
+    arm, fake = _dabai_arm(ready_config)
+    ticks = iter([0.0, 400.0])
+    with pytest.raises(NeedHuman):
+        run_dabai_view(arm, tmp_path / "dabai_next", sleep=lambda _: None, clock=lambda: next(ticks), log=lambda *a, **k: None, hover_only=True)
+    assert len(fake.writes) == 3 and arm.pose == PARK_POSE  # park, hover, 복귀 park. grasp 없음
+
+
+def test_dabai_view_uses_requested_r_index(ready_config, tmp_path):
+    table = generate(ready_config.table)
+    arm, fake = _dabai_arm(ready_config)
+    signal = tmp_path / "dabai_next"
+    run_dabai_view(arm, signal, sleep=_signaling_sleep(signal, [1]), clock=lambda: 0.0, log=lambda *a, **k: None, r_index=0, hover_only=True)
+    q = tuple(fake.writes[1][0])
+    assert q == (90,) + tuple(table.entries[0].hover)[:3] + (90,), (q, table.entries[0].hover)
+
+
+def test_dabai_view_cli_rejects_hover_only_on_other_commands(monkeypatch, tmp_path):
+    import sys
+
+    from learned_grasp import session
+
+    approval = tmp_path / "approval.json"
+    approval.write_text("{}")
+    monkeypatch.setattr(sys, "argv", ["session", "park", "--session", str(approval), "--hover-only"])
+    with pytest.raises(SystemExit, match="dabai-view에서만"):
+        session.main()

@@ -10,7 +10,7 @@
   python -m learned_grasp.session natural-spread --session runs/G0d-0/approval.json --start-confirmed
   python -m learned_grasp.session tolerance --session runs/G0d-1/approval.json --sheet results/G0d/sheet.json --spread runs/G0d-0/spread.json --start-confirmed
   python -m learned_grasp.session answer  --session runs/G0d-0/approval.json   (다른 터미널, 실행 중 질문에 답한다)
-  python -m learned_grasp.session dabai-view --session runs/DB-1/approval.json --start-confirmed   (도착 줄마다 촬영 뒤 `touch runs/DB-1/dabai_next`)
+  python -m learned_grasp.session dabai-view --session runs/DB-1/approval.json --start-confirmed [--r-index N] [--hover-only]   (도착 줄마다 촬영 뒤 `touch runs/DB-1/dabai_next`)
 
 대화형 입력이 없다. 감독자는 전원 차단으로 멈춘다. --start-confirmed는 사용자가 빈 그리퍼, 시작 자세,
 park까지의 경로를 눈으로 확인했다고 답한 뒤에만 붙인다. 높이 탐색은 앞 단계의 관찰 통과 기록이 있어야 다음 단계로 간다.
@@ -333,8 +333,19 @@ def _wait_dabai_signal(signal: Path, name: str, wait_s: float, sleep, clock, log
     signal.unlink(missing_ok=True)
 
 
-def run_dabai_view(arm: SafeArm, signal: Path, wait_s: float = 300.0, sleep=None, clock=None, log=print) -> None:
+def run_dabai_view(
+    arm: SafeArm,
+    signal: Path,
+    wait_s: float = 300.0,
+    sleep=None,
+    clock=None,
+    log=print,
+    r_index: int = DABAI_VIEW_R_INDEX,
+    hover_only: bool = False,
+) -> None:
     """DaBai 작업 거리 정지 촬영용. park→hover→grasp→hover→park를 열린 손으로 한 번 돈다.
+
+    hover_only면 hover에서 신호를 받은 뒤 grasp로 가지 않고 park로 돌아온다(쓰기 3회).
 
     hover와 grasp에 도착하면 도착 줄을 내고 signal 파일이 생길 때까지 쉰다. 촬영은 그 사이에 한다. 닫지 않는다.
     대기 상한을 넘기면(안전 위반이 아니다) 정상 전이로 park까지 돌아온다. 안전 위반은 자동 쓰기 없이 올라간다.
@@ -343,10 +354,18 @@ def run_dabai_view(arm: SafeArm, signal: Path, wait_s: float = 300.0, sleep=None
 
     sleep = sleep or _time.sleep
     clock = clock or _time.monotonic
-    hover = Pose(HOVER, DABAI_VIEW_R_INDEX, 90, 90)
-    grasp = Pose(GRASP, DABAI_VIEW_R_INDEX, 90, 90)
+    hover = Pose(HOVER, r_index, 90, 90)
+    grasp = Pose(GRASP, r_index, 90, 90)
     arm.goto(PARK_POSE)
     arm.goto(hover)
+    if hover_only:
+        try:
+            _wait_dabai_signal(signal, "hover", wait_s, sleep, clock, log)
+        except NeedHuman:
+            arm.goto(PARK_POSE)
+            raise
+        arm.goto(PARK_POSE)
+        return
     try:
         _wait_dabai_signal(signal, "hover", wait_s, sleep, clock, log)
         arm.goto(grasp)
@@ -476,6 +495,7 @@ def main() -> None:
     parser.add_argument("--spread", type=Path)
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--r-index", type=int)
+    parser.add_argument("--hover-only", action="store_true", help="dabai-view: hover에서 신호 뒤 grasp 없이 park로 돌아온다")
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
     parser.add_argument("--session", type=Path, required=True)
@@ -487,6 +507,8 @@ def main() -> None:
     parser.add_argument("--ok", action="store_true")
     parser.add_argument("--note", default="")
     args = parser.parse_args()
+    if args.hover_only and args.command != "dabai-view":
+        raise SystemExit("--hover-only는 dabai-view에서만 쓴다")
     if args.command == "answer":
         # 실행 중인 세션 옆 터미널에서 쓴다. 잠금과 드라이버를 잡지 않는다.
         print(answer_once(args.session.parent))
@@ -514,9 +536,10 @@ def main() -> None:
         print("물체 적재 확인을 기록했다")
         return
     if args.r_index is not None:
-        if args.command != "close-check":
-            raise SystemExit("--r-index는 close-check에서만 쓴다")
-        require_site_folder(folder, args.r_index)
+        if args.command not in ("close-check", "dabai-view"):
+            raise SystemExit("--r-index는 close-check와 dabai-view에서만 쓴다")
+        if args.command == "close-check":
+            require_site_folder(folder, args.r_index)
     if args.command == "carry-test" and args.attempt is None:
         raise SystemExit("--attempt가 필요하다")
     if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", *G0D_COMMANDS) and not args.start_confirmed:
@@ -550,7 +573,7 @@ def main() -> None:
         elif args.command == "descend":
             descend_and_stop(arm, config, table)
         elif args.command == "dabai-view":
-            run_dabai_view(arm, folder / "dabai_next")
+            run_dabai_view(arm, folder / "dabai_next", r_index=args.r_index if args.r_index is not None else DABAI_VIEW_R_INDEX, hover_only=args.hover_only)
         elif args.command == "park":
             arm.goto(PARK_POSE)
         elif args.command == "replay":
