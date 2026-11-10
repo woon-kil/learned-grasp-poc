@@ -70,7 +70,7 @@ class CloseWatch:
         self.on_expire = on_expire
         self.clock = clock
         self.started_at: float | None = None
-        self.expired = False
+        self._flag = False
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -84,10 +84,19 @@ class CloseWatch:
 
     def _run(self, cancel: threading.Event) -> None:
         if not cancel.wait(self.limit_s):
-            self.expired = True
+            self._flag = True
             self.on_expire(f"닫힘 {self.limit_s:g}초 한도 만료. 추가 쓰기를 막는다. 그리퍼는 닫힌 채다")
 
+    @property
+    def expired(self) -> bool:
+        """스레드 표시와 단조 시계를 모두 본다. 스레드가 늦어도 시계로 만료를 안다. 한 번 만료되면 풀리지 않는다."""
+        if not self._flag and self.started_at is not None and self.clock() - self.started_at >= self.limit_s:
+            self._flag = True
+        return self._flag
+
     def stop(self) -> None:
+        if self.expired:
+            return
         self._cancel.set()
         self.started_at = None
 
@@ -95,6 +104,31 @@ class CloseWatch:
         if self.started_at is None:
             return None
         return self.limit_s - (self.clock() - self.started_at)
+
+
+class WatchedDriver:
+    """원격 전송 바로 앞에서 닫힘 한도를 다시 본다. SafeArm 검사 뒤 계수 저장 등으로 늦어진 사이의 만료를 막는다."""
+
+    def __init__(self, driver: ArmDriver, watch: CloseWatch):
+        self.driver, self.watch = driver, watch
+
+    def _check(self) -> None:
+        if self.watch.expired:
+            raise SafetyViolation("닫힘 한도가 만료돼 전송하지 않는다")
+
+    def write6(self, q5, grip, time_ms):
+        self._check()
+        self.driver.write6(q5, grip, time_ms)
+
+    def write_grip(self, grip, time_ms):
+        self._check()
+        self.driver.write_grip(grip, time_ms)
+
+    def read(self):
+        return self.driver.read()
+
+    def close(self):
+        self.driver.close()
 
 
 class SafeArm:
@@ -116,6 +150,7 @@ class SafeArm:
         self.pose: Pose | None = None
         self.grip: int = gate.config.open_sdk
         self.holding = False
+        self.close_count = 0  # 실제로 보낸 닫기 명령 수. 쉼 묶음은 이 값으로 센다.
 
     def _check_watch(self) -> None:
         if self.close_watch is not None and self.close_watch.expired:
@@ -126,6 +161,7 @@ class SafeArm:
         self.gate.check_transition(self.pose, target)
         q5 = self.gate.joints(target)
         time_ms = self.gate.move_time_ms(self.pose, target, self.start_joints)
+        self._check_watch()
         self.driver.write6(q5, self.grip, time_ms)
         self.sleep((time_ms + self.gate.config.motion.settle_ms) / 1000.0)
         self._check_arrival(q5)
@@ -155,6 +191,8 @@ class SafeArm:
             if self.close_watch is not None and action == "close":
                 self.close_watch.start()
             self.driver.write_grip(grip, time_ms)
+            if action == "close":
+                self.close_count += 1
             self.sleep((time_ms + self.gate.config.motion.settle_ms) / 1000.0)
             if self.close_watch is not None and action == "open":
                 self.close_watch.stop()
@@ -249,4 +287,4 @@ class RemoteArm:
                 self.process.kill()
 
 
-__all__ = ["ApprovalError", "ArmDriver", "CloseWatch", "FakeArm", "PARK_POSE", "RemoteArm", "SafeArm", "SessionApproval", "load_approval"]
+__all__ = ["ApprovalError", "ArmDriver", "CloseWatch", "WatchedDriver", "FakeArm", "PARK_POSE", "RemoteArm", "SafeArm", "SessionApproval", "load_approval"]

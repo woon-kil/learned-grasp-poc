@@ -25,6 +25,7 @@ from learned_grasp.top_marker import Measurement, MeasureError, Placement, wrap_
 # 사람 답. ask(kind, prompt, deadline_s)는 마감 안의 답을 돌려주고, 마감을 넘기거나 늦은 답이면 None이다.
 Ask = Callable[[str, str, "float | None"], "str | None"]
 FAILURE_ANSWERS = ("miss", "held", "unknown")
+CLOSE_BATCH = 10  # 쉼 묶음. 실제로 보낸 닫기 명령 수로 센다(플랜 v9 172행). 묶음 끝에서 블록을 내려놓고 멈춘다.
 
 
 class StopSession(RuntimeError):
@@ -62,7 +63,9 @@ class G0dContext:
     release_s: float  # 미파지 답 뒤 hover 이동과 개방에 드는 시간. 실측으로 계약에 고정한다.
     placement_filter: PlacementFilter | None = None
     log: Callable[[str], None] = print
-    counters: dict = field(default_factory=lambda: {"return_failures": 0, "reloads": 0})
+    binding: dict = field(default_factory=dict)  # 기록에 묶을 기준 마커·spread 해시. 다르면 이어 쓰지 않는다
+    close_batch: int = CLOSE_BATCH
+    counters: dict = field(default_factory=lambda: {"return_failures": 0, "reloads": 0, "batch_end": False})
 
 
 def _measure(ctx: G0dContext, name: str) -> Measurement:
@@ -72,6 +75,22 @@ def _measure(ctx: G0dContext, name: str) -> Measurement:
     except (FileNotFoundError, OSError) as error:
         raise MeasureError("fetch_failed", str(error)) from error
     return ctx.placement.check(ctx.marker.measure(path))
+
+
+def _judge(ctx: G0dContext, trial: dict):
+    """집기 판정. 판정 사진의 바깥 기준 마커도 확인한다. 어긋나면 어떤 쓰기도 하지 않고 멈춘다."""
+    outcome = ctx.observer(trial)
+    name = f"{trial['trial_id']}-after"
+    try:
+        ctx.placement.check_reference(ctx.marker.measure(ctx.camera.fetch(name)))
+    except (MeasureError, FileNotFoundError, OSError) as error:
+        raise StopSession(f"{name}: 판정 사진 기준 확인 실패({error}). 추가 쓰기 없이 끝낸다") from error
+    return outcome
+
+
+def _batch_full(ctx: G0dContext, needed: int) -> bool:
+    """다음 자리에 필요한 닫기 수를 더하면 묶음을 넘는가."""
+    return ctx.arm.close_count + needed > ctx.close_batch
 
 
 def _answer_deadline(ctx: G0dContext) -> float:
@@ -88,6 +107,9 @@ def _failure_path(ctx: G0dContext, trial: dict, prefix: str, counted: bool) -> N
     ctx.ledger.note("failure_answer", trial_id=trial["trial_id"], answer=answer, counted=counted)
     if answer != "miss":
         raise StopSession(f"{trial['trial_id']}: 판정 실패 뒤 답 {answer!r}. 추가 쓰기 없이 끝낸다")
+    remaining = ctx.arm.close_watch.remaining()
+    if remaining is None or remaining < ctx.release_s:
+        raise StopSession(f"{trial['trial_id']}: 답은 왔지만 정상 해제 시간({ctx.release_s:g}초)이 남지 않았다")
     ctx.arm.goto(_pose(HOVER, trial, prefix))
     ctx.arm.set_grip("open")
     ctx.arm.goto(PARK_POSE)
@@ -140,7 +162,7 @@ def _return_cycle(ctx: G0dContext, trial: dict) -> bool:
         raise StopSession(f"{trial['trial_id']}: 복귀 재집기 하강 거부")
     _pick(ctx.arm, trial)
     ctx.arm.goto(PARK_POSE)
-    outcome = ctx.observer({**trial, "trial_id": f"{trial['trial_id']}-ret", "before_frame": name})
+    outcome = _judge(ctx, {**trial, "trial_id": f"{trial['trial_id']}-ret", "before_frame": name})
     ctx.ledger.note("return_pick", trial_id=trial["trial_id"], success=outcome.success, reason=outcome.reason)
     if outcome.success:
         return True
@@ -174,20 +196,33 @@ def variant_states(sheet: list[dict], records: list[dict]) -> dict[str, dict]:
     return states
 
 
+def sheet_sha256(sheet: list[dict]) -> str:
+    import hashlib
+
+    return hashlib.sha256(json.dumps(sheet, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
 def run_tolerance(ctx: G0dContext, sheet: list[dict]) -> dict[str, dict]:
-    """G0d 1차. 종결된 변형의 남은 자리와 이미 쓴 시도 ID는 건너뛴다. StopSession이면 그 자리에서 끝난다."""
+    """G0d 1차. 종결된 변형의 남은 자리와 이미 쓴 시도 ID는 건너뛴다. StopSession이면 그 자리에서 끝난다.
+
+    쉼 묶음(실제 닫기 CLOSE_BATCH회)에 닿기 전에 블록을 내려놓고 멈춘다. 같은 기록으로 다시 부르면 이어서 한다.
+    """
     arm, ledger = ctx.arm, ctx.ledger
     if arm.close_watch is None:
         raise ValueError("G0d는 닫힘 한도 감시가 필요하다")
-    _bind(arm, ledger, ctx.table)
+    _bind(arm, ledger, ctx.table, sheet_sha256=sheet_sha256(sheet), **ctx.binding)
     ledger.close_interrupted()
     arm.goto(PARK_POSE)
     arm.set_grip("open")
     has_block = False
+    trial = None
     for slot in sheet:
         started = {r["trial_id"] for r in ledger.records() if r["event"] in ("start", "finish")}
         if slot["variant_id"] in variant_states(sheet, ledger.records()) or slot["trial_id"] in started:
             continue
+        if _batch_full(ctx, (0 if has_block else 1) + 2):  # 적재 + 오프셋 집기 + 복귀 재집기
+            ctx.counters["batch_end"] = True
+            break
         trial = dict(slot)
         if not has_block:
             ctx.load_block(trial)
@@ -203,7 +238,11 @@ def run_tolerance(ctx: G0dContext, sheet: list[dict]) -> dict[str, dict]:
             continue
         _pick(arm, trial, "pick_")
         arm.goto(PARK_POSE)
-        outcome = ctx.observer(trial)
+        try:
+            outcome = _judge(ctx, trial)
+        except StopSession:
+            ledger.finish(trial["trial_id"], outcome="stopped", success=False, reason="판정 사진 기준 확인 실패", human_intervention=True)
+            raise
         if not outcome.success:
             try:
                 _failure_path(ctx, trial, "pick_", counted=True)
@@ -213,7 +252,12 @@ def run_tolerance(ctx: G0dContext, sheet: list[dict]) -> dict[str, dict]:
             ledger.finish(trial["trial_id"], outcome="failure", success=False, reason=outcome.reason, human_intervention=True, read_back=arm.read())
             continue
         ledger.finish(trial["trial_id"], outcome="success", success=True, reason=outcome.reason, read_back=arm.read())
-        has_block = _return_cycle(ctx, trial)
+        try:
+            has_block = _return_cycle(ctx, trial)
+        except StopSession as error:
+            # 복귀 중 오판정·정지면 그 변형 결과를 믿지 않는다(플랜 70행). 원래 시도 기록은 그대로 둔다.
+            ledger.note("incomplete", trial_id=trial["trial_id"], reason=f"복귀 중 정지: {error}")
+            raise
     if has_block:
         _place(arm, trial)
     return variant_states(sheet, ledger.records())
@@ -257,30 +301,62 @@ def spread_sheet(config, table) -> list[dict]:
     return sheet
 
 
-def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> None:
-    """G0d-0. 집기 실패 1건이면 실패 경로대로 놓아 주고 멈춘다. 배치 필터는 쓰지 않는다(여기서 정한다)."""
+def _warmup(ctx: G0dContext, trial: dict) -> None:
+    """적재 직후 같은 셀에서 놓기→P 집기를 한 번 더 한다. 다음 배치가 사람 적재가 아니라 일반 경로 다음이 되게 한다.
+    시도로 세지 않지만 배치 확인, 판정, 기준 확인, 실패 경로는 같다. 실패면 G0d-0을 멈춘다.
+    """
+    warm = {**trial, "trial_id": f"{trial['trial_id']}-w", "pick_r_index": trial["r_index"], "pick_j1": trial["j1"], "pick_j5": trial["j5"]}
+    if _place_and_check(ctx, warm) is None:
+        raise StopSession(f"{warm['trial_id']}: 준비 순환 배치 확인 2회 연속 실패")
+    _pick(ctx.arm, warm)
+    ctx.arm.goto(PARK_POSE)
+    outcome = _judge(ctx, warm)
+    ctx.ledger.note("warmup_pick", trial_id=trial["trial_id"], success=outcome.success, reason=outcome.reason)
+    if not outcome.success:
+        _failure_path(ctx, warm, "", counted=False)
+        raise StopSession(f"{warm['trial_id']}: 준비 순환 집기 실패. 마커 영향을 재검토한다")
+
+
+def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> bool:
+    """G0d-0. 집기 실패 1건이면 실패 경로대로 놓아 주고 멈춘다. 배치 필터는 쓰지 않는다(여기서 정한다).
+
+    쉼 묶음마다 블록을 내려놓고 멈추며, 같은 기록으로 다시 부르면 이어서 한다. 중단된 시도가 있으면 잇지 않는다.
+    시험표를 다 마치면 True다.
+    """
     arm, ledger = ctx.arm, ctx.ledger
     if arm.close_watch is None:
         raise ValueError("G0d는 닫힘 한도 감시가 필요하다")
     if ctx.placement_filter is not None:
         raise ValueError("G0d-0은 배치 필터 없이 돈다")
-    _bind(arm, ledger, ctx.table)
+    _bind(arm, ledger, ctx.table, sheet_sha256=sheet_sha256(sheet), **ctx.binding)
     if ledger.close_interrupted():
-        raise StopSession("G0d-0은 중단 뒤 이어서 하지 않는다. 새 기록으로 다시 시작한다")
-    if ledger.state()[0]:
-        raise StopSession("G0d-0 기록이 이미 있다. 새 기록으로 시작한다")
+        raise StopSession("G0d-0은 중단된 시도 뒤로 잇지 않는다. 새 기록으로 다시 시작한다")
+    finished, _ = ledger.state()
+    if any(not record["success"] for record in finished.values()) or any(r["event"] == "note" and r.get("kind") == "incomplete" for r in ledger.records()):
+        raise StopSession("G0d-0 기록에 실패나 미완료가 있다. 이어서 하지 않는다")
     arm.goto(PARK_POSE)
     arm.set_grip("open")
-    previous = "load"
-    for index, trial in enumerate(sheet):
-        trial = dict(trial)
-        if index == 0:
+    has_block, previous, trial = False, "load", None
+    for slot in sheet:
+        if slot["trial_id"] in finished:
+            continue
+        # 복귀 경로 다음의 같은 셀 일반 시도가 같은 묶음에 들어가도록 그 집기 1회를 미리 남긴다. 경로 비교 쌍이 묶음 경계로 끊기지 않는다.
+        needed = (0 if has_block else 2) + 1 + (2 if slot["path"] == "return" else 0)  # 적재 집기+준비 순환, 시도 집기, 복귀 재집기+다음 일반 집기
+        if _batch_full(ctx, needed):
+            ctx.counters["batch_end"] = True
+            break
+        trial = dict(slot)
+        if not has_block:
             ctx.load_block(trial)
             _pick(arm, trial)
             arm.goto(PARK_POSE)
+            _warmup(ctx, trial)
+            previous = "plain"
         if _place_and_check(ctx, trial) is None:
+            ledger.note("incomplete", trial_id=trial["trial_id"], reason="배치 확인 2회 연속 실패")
             raise StopSession(f"{trial['trial_id']}: 배치 확인 2회 연속 실패")
-        ledger.note("spread_place", trial_id=trial["trial_id"], cell=trial["cell"], after_path=previous, frame=trial["before_frame"])
+        has_block = False
+        ledger.note("spread_place", trial_id=trial["trial_id"], cell=trial["cell"], phase=trial["phase"], after_path=previous, frame=trial["before_frame"])
         if trial["path"] == "return":
             if not _confirm_descent_offset(ctx, trial):
                 raise StopSession(f"{trial['trial_id']}: 하강 전 확인 거부")
@@ -288,7 +364,11 @@ def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> None:
             ledger.start(trial)
         _pick(arm, trial, "pick_")
         arm.goto(PARK_POSE)
-        outcome = ctx.observer(trial)
+        try:
+            outcome = _judge(ctx, trial)
+        except StopSession:
+            ledger.finish(trial["trial_id"], outcome="stopped", success=False, reason="판정 사진 기준 확인 실패", human_intervention=True)
+            raise
         if not outcome.success:
             try:
                 _failure_path(ctx, trial, "pick_", counted=True)
@@ -296,49 +376,73 @@ def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> None:
                 ledger.finish(trial["trial_id"], outcome="failure", success=False, reason=outcome.reason, human_intervention=True)
             raise StopSession(f"{trial['trial_id']}: G0d-0 집기 실패. 마커 영향을 재검토한다")
         ledger.finish(trial["trial_id"], outcome="success", success=True, reason=outcome.reason, read_back=arm.read())
-        if trial["path"] == "return" and not _return_cycle(ctx, trial):
-            raise StopSession(f"{trial['trial_id']}: 복귀 재집기 실패")
+        if trial["path"] == "return":
+            try:
+                if not _return_cycle(ctx, trial):
+                    raise StopSession(f"{trial['trial_id']}: 복귀 재집기 실패")
+            except StopSession as error:
+                ledger.note("incomplete", trial_id=trial["trial_id"], reason=f"복귀 중 정지: {error}")
+                raise
+        has_block = True
         previous = trial["path"]
-    last = dict(sheet[-1])
-    last["trial_id"] = "n-end"
-    if _place_and_check(ctx, last) is None:
-        raise StopSession("끝 배치 확인 2회 연속 실패")
-    ledger.note("spread_place", trial_id="n-end", cell=last["cell"], after_path=previous, frame=last["before_frame"])
+    complete = all(slot["trial_id"] in ledger.state()[0] for slot in sheet)
+    if complete and has_block:
+        last = dict(sheet[-1])
+        last["trial_id"] = "n-end"
+        if _place_and_check(ctx, last) is None:
+            raise StopSession("끝 배치 확인 2회 연속 실패")
+        ledger.note("spread_place", trial_id="n-end", cell=last["cell"], phase="end", after_path=previous, frame=last["before_frame"])
+    elif has_block:
+        _place(arm, trial)
+    return complete
+
+
+def _circular_mean_deg(values: list[float]) -> float:
+    return math.degrees(math.atan2(sum(math.sin(math.radians(v)) for v in values), sum(math.cos(math.radians(v)) for v in values)))
 
 
 def summarize_spread(records: list[dict]) -> dict:
-    """기준 = 일반 경로 다음 배치의 셀별 중앙값, 흩어짐 = 그 기준에서의 편차 최대.
-    복귀 경로 다음 배치가 그 셀 흩어짐을 넘으면 transfer=unverified다. 적재 다음 배치는 기준에서 뺀다.
+    """기준 = spread 단계(일반 경로 24회)에서 일반 경로 다음 배치의 셀별 위치 중앙값과 각도 원형 평균.
+    흩어짐 = 그 기준에서의 편차 최대. 적재 직후에는 준비 순환을 거치므로 묶음 첫 배치도 일반 경로 다음이다.
+    경로 비교 단계 배치는 기준에 넣지 않는다.
+    경로 비교에서 복귀 경로 다음(같은 셀) 배치가 그 셀 흩어짐을 넘으면 transfer=unverified다.
+    노란 화소는 집기 성공 사진(일반·오프셋·복귀 재집기) 전부의 최대다.
     """
     import re
     import statistics
 
+    frames = {r.get("frame"): r for r in records if r["event"] == "note" and r.get("kind") == "placement" and r.get("ok")}
     rows = []
     for note in (r for r in records if r["event"] == "note" and r.get("kind") == "spread_place"):
-        m = next((r for r in records if r["event"] == "note" and r.get("kind") == "placement" and r.get("ok") and r.get("frame") == note["frame"]), None)
-        rows.append({"cell": note["cell"], "after": note["after_path"], "x": m["measurement"]["position"][0], "y": m["measurement"]["position"][1], "angle": m["measurement"]["angle"]})
+        m = frames[note["frame"]]["measurement"]
+        rows.append({"cell": note["cell"], "phase": note.get("phase"), "after": note["after_path"], "x": m["position"][0], "y": m["position"][1], "angle": m["angle"]})
     cells = {}
     for cell in sorted({row["cell"] for row in rows}):
-        plain = [row for row in rows if row["cell"] == cell and row["after"] == "plain"]
-        center = (statistics.median(r["x"] for r in plain), statistics.median(r["y"] for r in plain), statistics.median(r["angle"] for r in plain))
-        def dev(row):
+        base = [row for row in rows if row["cell"] == cell and row["after"] == "plain" and row["phase"] == "spread"]
+        if not base:
+            continue
+        center = (statistics.median(r["x"] for r in base), statistics.median(r["y"] for r in base), _circular_mean_deg([r["angle"] for r in base]))
+
+        def dev(row, center=center):
             return math.dist((row["x"], row["y"]), center[:2]), abs(wrap_deg(row["angle"] - center[2]))
-        pos_max = max(dev(r)[0] for r in plain)
-        ang_max = max(dev(r)[1] for r in plain)
+
+        pos_max = max(dev(r)[0] for r in base)
+        ang_max = max(dev(r)[1] for r in base)
         returned = [dev(r) for r in rows if r["cell"] == cell and r["after"] == "return"]
         cells[cell] = {
             "center": [round(v, 3) for v in center], "position_max_px": round(pos_max, 3), "angle_max_deg": round(ang_max, 3),
-            "plain_n": len(plain), "return_n": len(returned),
+            "base_n": len(base), "return_n": len(returned),
             "return_dev": [[round(p, 3), round(a, 3)] for p, a in returned],
             "return_outside": sum(1 for p, a in returned if p > pos_max or a > ang_max),
         }
-    yellow = [int(m.group(1)) for r in records if r["event"] == "finish" and r.get("success") and (m := re.search(r"노란 화소 (\d+)", r.get("reason", "")))]
-    successes = [r for r in records if r["event"] == "finish"]
+    successes = [r.get("reason", "") for r in records if (r["event"] == "finish" and r.get("success")) or (r["event"] == "note" and r.get("kind") in ("return_pick", "warmup_pick") and r.get("success"))]
+    yellow = [int(m.group(1)) for reason in successes if (m := re.search(r"노란 화소 (\d+)", reason))]
+    finishes = [r for r in records if r["event"] == "finish"]
     return {
         "cells": cells,
-        "transfer": "verified" if cells and all(c["return_outside"] == 0 and c["return_n"] == COMPARE_REPEATS for c in cells.values()) else "unverified",
-        "trials": len(successes),
-        "failures": sum(1 for r in successes if not r.get("success")),
+        "transfer": "verified" if len(cells) == 3 and all(c["return_outside"] == 0 and c["return_n"] == COMPARE_REPEATS for c in cells.values()) else "unverified",
+        "trials": len(finishes),
+        "failures": sum(1 for r in finishes if not r.get("success")),
         "yellow_max_success": max(yellow) if yellow else None,
         "yellow_ok": bool(yellow) and max(yellow) <= YELLOW_HOLD_MAX,
     }

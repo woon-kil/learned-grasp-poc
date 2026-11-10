@@ -25,7 +25,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from learned_grasp.answers import FileAnswers, answer_once
-from learned_grasp.arm import CloseWatch, RemoteArm, SafeArm, SessionApproval, load_approval
+from learned_grasp.arm import CloseWatch, RemoteArm, SafeArm, SessionApproval, WatchedDriver, load_approval
 from learned_grasp.attempts import AttemptLedger
 from learned_grasp.camera import P620Camera
 from learned_grasp.config import Config, load_config
@@ -356,38 +356,51 @@ def g0d_limits(session: Path) -> tuple[float, float]:
 
 
 def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder: Path, session_id: str, release_s: float, sheet_path: Path | None, spread_path: Path | None) -> None:
+    """G0d-0과 G0d 1차. 쉼 묶음마다 블록을 내려놓고 끝나며, 같은 명령을 다시 실행하면 이어서 한다."""
+    import hashlib
+
     from learned_grasp.tolerance import G0dContext, StopSession, filter_from_spread, run_natural_spread, run_tolerance, spread_sheet, summarize_spread
     from learned_grasp.top_marker import Placement, TopMarker
 
     marker = TopMarker()  # OpenCV 버전이 다르면 쓰기 전에 멈춘다
     spread = None
+    binding: dict = {}
     if command == "tolerance":
         if sheet_path is None or spread_path is None:
             raise SystemExit("tolerance는 --sheet와 --spread가 필요하다")
-        spread = json.loads(spread_path.read_text(encoding="utf-8"))
+        raw = spread_path.read_bytes()
+        spread = json.loads(raw)
         if not (spread.get("complete") and spread.get("failures") == 0 and spread.get("yellow_ok")):
             raise SystemExit("G0d-0이 완결·무실패·노란 화소 기준을 채우지 않아 G0d 1차로 가지 않는다")
+        binding["spread_sha256"] = hashlib.sha256(raw).hexdigest()
     camera = P620Camera(f"runs/{session_id}/frames")
     try:
-        if spread is None:
-            camera.snapshot("reference")
-            reference = marker.measure(camera.fetch("reference")).outer
-        else:
+        if spread is not None:
             reference = {int(k): tuple(v) for k, v in spread["reference"].items()}
+        else:
+            # 기준은 G0d-0 첫 실행에서 한 번 고정하고 이어지는 묶음에서 그대로 쓴다(플랜 55행).
+            saved = folder / "reference.json"
+            if saved.exists():
+                reference = {int(k): tuple(v) for k, v in json.loads(saved.read_text(encoding="utf-8")).items()}
+            else:
+                camera.snapshot("reference")
+                reference = marker.measure(camera.fetch("reference")).outer
+                Placement(reference)  # 기준 마커가 모자라면 쓰기 전에 멈춘다
+                saved.write_text(json.dumps({str(k): list(v) for k, v in reference.items()}), encoding="utf-8")
+        binding["reference"] = {str(k): [round(c, 3) for c in v] for k, v in sorted(reference.items())}
         ctx = G0dContext(
             arm=arm, camera=camera, ledger=AttemptLedger(folder / ("spread.jsonl" if spread is None else "tolerance.jsonl")), table=table,
             observer=make_pick_observer(camera), marker=marker, placement=Placement(reference), ask=FileAnswers(folder),
             load_block=make_block_loader(arm, folder / "block_ready"), release_s=release_s,
-            placement_filter=None if spread is None else filter_from_spread(spread),
+            placement_filter=None if spread is None else filter_from_spread(spread), binding=binding,
         )
         try:
             if spread is None:
                 complete = False
                 try:
-                    run_natural_spread(ctx, spread_sheet(config, table))
-                    complete = True
+                    complete = run_natural_spread(ctx, spread_sheet(config, table))
                 finally:
-                    summary = summarize_spread(ctx.ledger.records()) | {"complete": complete, "reference": {str(k): list(v) for k, v in reference.items()}, "counters": ctx.counters}
+                    summary = summarize_spread(ctx.ledger.records()) | {"complete": complete, "reference": binding["reference"], "counters": ctx.counters}
                     (folder / "spread.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
                     print(json.dumps(summary, ensure_ascii=False))
             else:
@@ -396,6 +409,8 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
                 result = compute_tolerance(tolerance_variants(config, table), states, spread["transfer"]) | {"counters": ctx.counters}
                 (folder / "tolerance.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
                 print(json.dumps(result, ensure_ascii=False))
+            if ctx.counters["batch_end"]:
+                print("쉼 묶음 끝. 블록을 내려놓았다. 열을 확인하고 같은 명령으로 이어서 한다")
         except StopSession as error:
             raise SystemExit(f"추가 쓰기 없이 멈췄다: {error}") from error
     finally:
@@ -467,7 +482,8 @@ def main() -> None:
             return
         start = read_start_joints(driver, folder)
         watch = None if limits is None else CloseWatch(limits[0])
-        arm = SafeArm(CountingDriver(driver, counter, approval.max_writes), SafetyGate(config, table), start_joints=start, close_watch=watch)
+        sender = driver if watch is None else WatchedDriver(driver, watch)
+        arm = SafeArm(CountingDriver(sender, counter, approval.max_writes), SafetyGate(config, table), start_joints=start, close_watch=watch)
         loader = make_block_loader(arm, folder / "block_ready")
         if args.command == "fit":
             run_fit(arm, config, table, loader, min(args.hold_sec, 60.0))

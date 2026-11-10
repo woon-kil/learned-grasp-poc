@@ -201,9 +201,9 @@ def _pick(arm: SafeArm, trial: dict, prefix: str = "") -> None:
     arm.goto(_pose(HOVER, trial, prefix))
 
 
-def _bind(arm: SafeArm, ledger: AttemptLedger, table: PoseTable) -> None:
-    """기록을 구성 버전과 표에 묶는다. 다른 구성으로 같은 기록을 이어 쓰지 못한다."""
-    ledger.bind(config_version=arm.gate.config.config_version, table_sha256=table.sha256())
+def _bind(arm: SafeArm, ledger: AttemptLedger, table: PoseTable, **extra) -> None:
+    """기록을 구성 버전과 표에 묶는다. 다른 구성으로 같은 기록을 이어 쓰지 못한다. extra는 G0d 기준·시험표 등이다."""
+    ledger.bind(config_version=arm.gate.config.config_version, table_sha256=table.sha256(), **extra)
 
 
 def run_dryrun(

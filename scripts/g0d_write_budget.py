@@ -30,27 +30,35 @@ class Marker:
 
 
 def count(run, sheet, outcome, answers, folder):
+    """쉼 묶음마다 새 SafeArm(새 세션)으로 끝까지 돈다. 전체 쓰기·닫기와 묶음당 최대 쓰기를 돌려준다."""
     config = load_config(Path(ROOT) / "config" / "workspace.yaml")
     table = table_for(config)
     driver = FakeArm()
-    arm = SafeArm(driver, SafetyGate(config, table), sleep=lambda _: None, close_watch=CloseWatch(3600, on_expire=lambda _: None))
-    ctx = G0dContext(
-        arm=arm, camera=Camera(), ledger=AttemptLedger(folder / "a.jsonl"), table=table, observer=outcome, marker=Marker(),
-        placement=Placement(REF), ask=lambda kind, prompt, deadline: answers.get(kind, "y"), load_block=lambda trial: None, release_s=1.0, log=lambda _: None,
-    )
-    run(ctx, sheet(config, table))
-    closes = sum(1 for (_, grip, _), (_, prev, _) in zip(driver.writes[1:], driver.writes) if grip != prev and grip == config.close_sdk)
-    return len(driver.writes), closes
+    ledger = AttemptLedger(folder / "a.jsonl")
+    per_batch, closes, batches = [], 0, 0
+    while True:
+        arm = SafeArm(driver, SafetyGate(config, table), sleep=lambda _: None, close_watch=CloseWatch(3600, on_expire=lambda _: None))
+        ctx = G0dContext(
+            arm=arm, camera=Camera(), ledger=ledger, table=table, observer=outcome, marker=Marker(),
+            placement=Placement(REF), ask=lambda kind, prompt, deadline: answers.get(kind, "y"), load_block=lambda trial: None, release_s=1.0, log=lambda _: None,
+        )
+        before = len(driver.writes)
+        result = run(ctx, sheet(config, table))
+        per_batch.append(len(driver.writes) - before)
+        closes += arm.close_count
+        batches += 1
+        if not ctx.counters["batch_end"] or result is True:
+            return len(driver.writes), closes, batches, max(per_batch)
 
 
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     (tmp / "s").mkdir(), (tmp / "t").mkdir(), (tmp / "w").mkdir()
-    print("G0d-0 전부 성공: 쓰기 %d, 닫기 %d" % count(run_natural_spread, spread_sheet, lambda t: Outcome(True), {}, tmp / "s"))
-    print("G0d 1차 전부 성공(72회): 쓰기 %d, 닫기 %d" % count(run_tolerance, lambda c, t: tolerance_sheet(c, t, 1), lambda t: Outcome(True), {}, tmp / "t"))
+    print("G0d-0 전부 성공: 쓰기 %d, 닫기 %d, 묶음 %d, 묶음당 최대 쓰기 %d" % count(run_natural_spread, spread_sheet, lambda t: Outcome(True), {}, tmp / "s"))
+    print("G0d 1차 전부 성공(72회): 쓰기 %d, 닫기 %d, 묶음 %d, 묶음당 최대 쓰기 %d" % count(run_tolerance, lambda c, t: tolerance_sheet(c, t, 1), lambda t: Outcome(True), {}, tmp / "t"))
 
     # 상한: 변형마다 5회. 4번째 시도만 실패(미파지 답)해 재적재까지 거친다.
     def worst(trial):
         return Outcome(not trial["trial_id"].endswith("-t3"))
 
-    print("G0d 1차 상한(90회, 각 변형 4번째 실패): 쓰기 %d, 닫기 %d" % count(run_tolerance, lambda c, t: tolerance_sheet(c, t, 1), worst, {"failure": "miss"}, tmp / "w"))
+    print("G0d 1차 상한(90회, 각 변형 4번째 실패): 쓰기 %d, 닫기 %d, 묶음 %d, 묶음당 최대 쓰기 %d" % count(run_tolerance, lambda c, t: tolerance_sheet(c, t, 1), worst, {"failure": "miss"}, tmp / "w"))

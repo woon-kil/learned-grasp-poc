@@ -123,6 +123,13 @@ class Placement:
         self.limit_px = limit_px
 
     def check(self, measurement: Measurement) -> Measurement:
+        self.check_reference(measurement)
+        if not measurement.top:
+            raise MeasureError("top_missing", f"{measurement.name}: 윗면 마커 id {TOP_ID} 없음")
+        return measurement
+
+    def check_reference(self, measurement: Measurement) -> Measurement:
+        """바깥쪽 기준 마커만 본다. 블록이 없는 판정 사진에 쓴다."""
         missing = [i for i in REFERENCE_IDS if i not in measurement.outer]
         if missing:
             raise MeasureError("reference_missing", f"{measurement.name}: 바깥쪽 마커 {missing} 없음")
@@ -130,6 +137,4 @@ class Placement:
             moved = math.dist(measurement.outer[i], self.reference[i])
             if moved > self.limit_px:
                 raise MeasureError("reference_moved", f"{measurement.name}: 마커 {i}가 기준에서 {moved:.2f}화소")
-        if not measurement.top:
-            raise MeasureError("top_missing", f"{measurement.name}: 윗면 마커 id {TOP_ID} 없음")
         return measurement

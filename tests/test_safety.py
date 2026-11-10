@@ -354,3 +354,26 @@ def test_close_watch_needs_positive_limit():
 
     with pytest.raises(ValueError):
         CloseWatch(0)
+
+
+def test_close_watch_expires_by_clock_even_if_thread_is_late(ready_config, table):
+    """감시 스레드가 아직 깨지 않아도 단조 시계가 한도를 넘었으면 전송 직전 검사가 막는다."""
+    from learned_grasp.arm import CloseWatch, WatchedDriver
+
+    now = {"t": 0.0}
+    watch = CloseWatch(1000.0, on_expire=lambda _: None, clock=lambda: now["t"])
+    inner = FakeArm()
+    arm = SafeArm(WatchedDriver(inner, watch), SafetyGate(ready_config, table), sleep=lambda _: None, close_watch=watch)
+    arm.goto(PARK_POSE)
+    arm.goto(hover())
+    arm.goto(grasp())
+    arm.set_grip("close")
+    now["t"] = 1000.5
+    count = len(inner.writes)
+    with pytest.raises(SafetyViolation, match="만료"):
+        arm.goto(hover())
+    with pytest.raises(SafetyViolation, match="만료"):
+        WatchedDriver(inner, watch).write6((90, 90, 90, 90, 90), 100, 1500)
+    assert len(inner.writes) == count
+    watch.stop()
+    assert watch.expired  # 한 번 만료되면 개방으로도 풀리지 않는다

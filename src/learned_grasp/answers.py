@@ -38,11 +38,12 @@ class FileAnswers:
     def __call__(self, kind: str, prompt: str, deadline_s: float | None) -> str | None:
         if kind not in CHOICES:
             raise ValueError(kind)
+        # 마감은 질문을 게시하기 전에 정한다. 게시·로그 지연이 마감을 늘리지 않는다.
+        end = None if deadline_s is None else self.clock() + deadline_s
         qid = uuid.uuid4().hex
         self.answer.unlink(missing_ok=True)
         _write(self.question, {"id": qid, "kind": kind, "prompt": prompt, "choices": CHOICES[kind], "deadline_s": deadline_s})
         self.log(json.dumps({"need_answer": kind, "prompt": prompt, "deadline_s": deadline_s}, ensure_ascii=False))
-        end = None if deadline_s is None else self.clock() + deadline_s
         try:
             while True:
                 if self.answer.exists():

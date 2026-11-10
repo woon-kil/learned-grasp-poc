@@ -48,12 +48,15 @@ class World:
         self.answers: dict[tuple[str, str], str | None] = {}
         self.asked: list[tuple[str, str, int, float | None]] = []
         self.loads = 0
+        self.batches = 0
+        self.judged: list[tuple[str, int]] = []
         self.ctx = G0dContext(
             arm=self.arm, camera=self.camera, ledger=self.ledger, table=table, observer=self.observe, marker=self.marker,
             placement=Placement(REF), ask=self.ask, load_block=self.load, release_s=5.0, log=lambda text: None,
         )
 
     def observe(self, trial):
+        self.judged.append((trial["trial_id"], len(self.driver.writes)))
         return Outcome(self.outcomes.get(trial["trial_id"], True), "각본")
 
     def ask(self, kind, prompt, deadline):
@@ -64,8 +67,27 @@ class World:
     def load(self, trial):
         self.loads += 1
 
+    def _new_batch(self):
+        """쉼 묶음 뒤 새 세션과 같다. 닫기 계수는 새 SafeArm처럼 0에서 시작한다."""
+        self.batches += 1
+        self.arm.close_count = 0
+        self.arm.pose = None
+        self.ctx.counters["batch_end"] = False
+
     def run(self, sheet):
-        return run_tolerance(self.ctx, sheet)
+        while True:
+            self._new_batch()
+            states = run_tolerance(self.ctx, sheet)
+            if not self.ctx.counters["batch_end"]:
+                return states
+
+    def spread(self, sheet):
+        from learned_grasp.tolerance import run_natural_spread
+
+        while True:
+            self._new_batch()
+            if run_natural_spread(self.ctx, sheet) or not self.ctx.counters["batch_end"]:
+                return
 
 
 @pytest.fixture
@@ -86,7 +108,7 @@ def test_all_success_passes_every_variant_with_four_trials(ready_config, table, 
     assert not any(t["trial_id"].endswith("-t4") for t in finished.values())
     result = compute_tolerance(tolerance_variants(ready_config, table), states, "verified")
     assert all(axis["usable"] for axis in result.values())
-    assert world.loads == 1  # 복귀 성공이면 블록을 쥔 채 다음 시도로 간다
+    assert world.loads == world.batches > 1  # 복귀 성공이면 블록을 쥔 채 다음 시도로 가고, 묶음마다 다시 적재한다
 
 
 def test_return_cycle_command_order(ready_config, table, tmp_path, sheet):
@@ -243,16 +265,22 @@ def test_return_repick_descent_refusal_stops_before_grasp(ready_config, table, t
 
 def test_resume_skips_used_ids_and_marks_interrupted_incomplete(ready_config, table, tmp_path, sheet):
     world = World(ready_config, table, tmp_path)
-    world.run(sheet[:2])
-    world.ledger.start(sheet[2])  # 이전 세션이 이 시도 중에 끊겼다
+    world.ctx.close_batch = 7
+    world._new_batch()
+    run_tolerance(world.ctx, sheet)
+    done = [r["trial_id"] for r in world.ledger.records() if r["event"] == "finish"]
+    nxt = next(s for s in sheet if s["trial_id"] not in done)
+    world.ledger.start(nxt)  # 이전 세션이 이 시도 중에 끊겼다
     again = World(ready_config, table, tmp_path)
-    states = again.run(sheet[:4])
+    again.ctx.close_batch = 7
+    again._new_batch()
+    states = run_tolerance(again.ctx, sheet)
     finished, _ = again.ledger.state()
     starts = [r["trial_id"] for r in again.ledger.records() if r["event"] == "start"]
     assert len(starts) == len(set(starts))
-    assert finished[sheet[2]["trial_id"]]["outcome"] == "interrupted"
-    assert states[sheet[2]["variant_id"]]["status"] == "incomplete"
-    assert sheet[3]["trial_id"] in finished
+    assert finished[nxt["trial_id"]]["outcome"] == "interrupted"
+    assert states[nxt["variant_id"]]["status"] == "incomplete"
+    assert len(finished) > len(done) + 1
 
 
 def test_requires_close_watch(ready_config, table, tmp_path, sheet):
@@ -292,9 +320,10 @@ def test_natural_spread_runs_and_summarizes(ready_config, table, tmp_path):
         k = next(shift)
         return Measurement(str(path), "x" * 64, dict(REF), True, True, (float(k % 3), 0.0), float(k % 2))
     world.marker.measure = measure
-    run_natural_spread(world.ctx, sheet)
+    world.spread(sheet)
     descents = [a for a in world.asked if a[0] == "descent"]
     assert len(descents) == 9 * 2  # 복귀 경로만 하강 전 확인(오프셋 집기와 복귀 재집기)
+    assert all(c["base_n"] == 8 for c in summarize_spread(world.ledger.records())["cells"].values())
     summary = summarize_spread(world.ledger.records())
     assert summary["trials"] == 42 and summary["failures"] == 0
     assert summary["yellow_max_success"] == 30 and summary["yellow_ok"]
@@ -311,7 +340,7 @@ def test_natural_spread_stops_on_first_failure(ready_config, table, tmp_path):
     sheet = spread_sheet(ready_config, table)
     world.outcomes[sheet[3]["trial_id"]] = False
     with pytest.raises(StopSession, match="G0d-0 집기 실패"):
-        run_natural_spread(world.ctx, sheet)
+        world.spread(sheet)
     finished, _ = world.ledger.state()
     assert len(finished) == 4 and not finished[sheet[3]["trial_id"]]["success"]
 
@@ -327,9 +356,9 @@ def test_spread_return_outside_makes_transfer_unverified():
     from learned_grasp.tolerance import summarize_spread
 
     records = []
-    def place(tid, cell, after, x):
-        records.append({"event": "note", "kind": "placement", "ok": True, "trial_id": tid, "frame": f"{tid}-p1", "measurement": {"position": [x, 0.0], "angle": 0.0}})
-        records.append({"event": "note", "kind": "spread_place", "trial_id": tid, "cell": cell, "after_path": after, "frame": f"{tid}-p1"})
+    def place(tid, cell, after, x, angle=0.0):
+        records.append({"event": "note", "kind": "placement", "ok": True, "trial_id": tid, "frame": f"{tid}-p1", "measurement": {"position": [x, 0.0], "angle": angle}})
+        records.append({"event": "note", "kind": "spread_place", "trial_id": tid, "cell": cell, "phase": "spread" if after == "plain" else "compare", "after_path": after, "frame": f"{tid}-p1"})
     for k, x in enumerate((0.0, 1.0, 2.0)):
         place(f"a{k}", 0, "plain", x)
     for k, x in enumerate((1.0, 1.5, 5.0)):
@@ -337,3 +366,148 @@ def test_spread_return_outside_makes_transfer_unverified():
     summary = summarize_spread(records)
     assert summary["cells"][0]["position_max_px"] == 1.0 and summary["cells"][0]["return_outside"] == 1
     assert summary["transfer"] == "unverified"
+
+
+def test_failure_branch_sends_nothing_between_judge_and_answer(ready_config, table, tmp_path, sheet):
+    world = World(ready_config, table, tmp_path)
+    world.outcomes[sheet[0]["trial_id"]] = False
+    world.run(sheet[:1])
+    judged = dict(world.judged)[sheet[0]["trial_id"]]
+    asked = next(a for a in world.asked if a[0] == "failure")[2]
+    assert judged == asked
+
+
+def test_judge_photo_reference_move_stops_before_any_write(ready_config, table, tmp_path, sheet):
+    world = World(ready_config, table, tmp_path)
+    trial = sheet[0]
+    world.marker.special[f"{trial['trial_id']}-after"] = Measurement("a", "x" * 64, {0: (919.0, 654.0), 1: (851.0, 211.0)}, False, False)
+    with pytest.raises(StopSession, match="판정 사진 기준"):
+        world.run(sheet)
+    assert len(world.driver.writes) == dict(world.judged)[trial["trial_id"]]
+    finished, _ = world.ledger.state()
+    assert finished[trial["trial_id"]]["outcome"] == "stopped"
+
+
+def test_close_batch_stops_with_block_down_and_resumes(ready_config, table, tmp_path, sheet):
+    world = World(ready_config, table, tmp_path)
+    world._new_batch()
+    run_tolerance(world.ctx, sheet)
+    assert world.ctx.counters["batch_end"]
+    assert 0 < world.arm.close_count <= 10
+    assert not world.arm.holding and world.driver.writes[-1][0] == world.arm.gate.joints(PARK_POSE)
+    first = len(world.ledger.state()[0])
+    world.run(sheet)
+    assert len(world.ledger.state()[0]) == 72 > first
+
+
+def test_return_stop_marks_variant_incomplete_for_resume(ready_config, table, tmp_path, sheet):
+    world = World(ready_config, table, tmp_path)
+    trial = sheet[0]
+    world.outcomes[f"{trial['trial_id']}-ret"] = False
+    world.answers[("failure", f"{trial['trial_id']}-ret")] = "held"
+    with pytest.raises(StopSession):
+        world.run(sheet)
+    states = variant_states(sheet, world.ledger.records())
+    assert states[trial["variant_id"]]["status"] == "incomplete"
+    again = World(ready_config, table, tmp_path)
+    again.run(sheet)
+    starts = [r["trial_id"] for r in again.ledger.records() if r["event"] == "start"]
+    assert [s for s in starts if s.startswith(trial["variant_id"] + "-")] == [trial["trial_id"]]
+
+
+def test_answer_without_release_time_left_is_refused(ready_config, table, tmp_path, sheet):
+    """답이 왔어도 그 사이 시간이 흘러 해제 시간이 모자라면 움직이지 않는다."""
+    world = World(ready_config, table, tmp_path, limit_s=60.0)
+    trial = sheet[0]
+    world.outcomes[trial["trial_id"]] = False
+    clock = {"now": 0.0}
+    world.watch.clock = lambda: clock["now"]
+
+    def slow(kind, prompt, deadline):
+        world.asked.append((kind, prompt.split(" ")[0].rstrip(":"), len(world.driver.writes), deadline))
+        if kind == "failure":
+            clock["now"] += 58.0
+            return "miss"
+        return "y"
+
+    world.ctx.ask = slow
+    with pytest.raises(StopSession, match="해제 시간"):
+        world.run(sheet)
+    assert len(world.driver.writes) == next(a for a in world.asked if a[0] == "failure")[2]
+
+
+def test_ledger_bound_to_binding_and_sheet(ready_config, table, tmp_path, sheet):
+    world = World(ready_config, table, tmp_path)
+    world.ctx.binding = {"spread_sha256": "a"}
+    world.run(sheet[:1])
+    again = World(ready_config, table, tmp_path)
+    again.ctx.binding = {"spread_sha256": "b"}
+    with pytest.raises(RuntimeError, match="이어 쓸 수 없다"):
+        again.run(sheet[:1])
+    other = World(ready_config, table, tmp_path)
+    other.ctx.binding = {"spread_sha256": "a"}
+    with pytest.raises(RuntimeError, match="이어 쓸 수 없다"):
+        other.run(tolerance_sheet(ready_config, table, 2))
+
+
+def test_spread_yellow_counts_return_picks():
+    from learned_grasp.tolerance import summarize_spread
+
+    records = [
+        {"event": "finish", "success": True, "reason": "변화 0.0500, 노란 화소 30"},
+        {"event": "note", "kind": "return_pick", "success": True, "reason": "변화 0.0500, 노란 화소 80"},
+    ]
+    assert summarize_spread(records)["yellow_max_success"] == 80 and not summarize_spread(records)["yellow_ok"]
+
+
+def test_spread_angle_center_wraps():
+    from learned_grasp.tolerance import summarize_spread
+
+    records = []
+    for k, angle in enumerate((179.0, -179.0, 178.0)):
+        records.append({"event": "note", "kind": "placement", "ok": True, "trial_id": f"a{k}", "frame": f"a{k}", "measurement": {"position": [0.0, 0.0], "angle": angle}})
+        records.append({"event": "note", "kind": "spread_place", "trial_id": f"a{k}", "cell": 0, "phase": "spread", "after_path": "plain", "frame": f"a{k}"})
+    records.append({"event": "note", "kind": "placement", "ok": True, "trial_id": "r", "frame": "r", "measurement": {"position": [0.0, 0.0], "angle": 0.0}})
+    records.append({"event": "note", "kind": "spread_place", "trial_id": "r", "cell": 0, "phase": "compare", "after_path": "return", "frame": "r"})
+    cell = summarize_spread(records)["cells"][0]
+    assert abs(abs(cell["center"][2]) - 179.33) < 0.1 and cell["angle_max_deg"] < 2.0
+    assert cell["return_outside"] == 1
+
+
+def test_spread_baseline_uses_spread_phase_only():
+    from learned_grasp.tolerance import summarize_spread
+
+    records = []
+    for k, (phase, x) in enumerate((("spread", 0.0), ("spread", 1.0), ("compare", 9.0))):
+        records.append({"event": "note", "kind": "placement", "ok": True, "trial_id": f"a{k}", "frame": f"a{k}", "measurement": {"position": [x, 0.0], "angle": 0.0}})
+        records.append({"event": "note", "kind": "spread_place", "trial_id": f"a{k}", "cell": 0, "phase": phase, "after_path": "plain", "frame": f"a{k}"})
+    cell = summarize_spread(records)["cells"][0]
+    assert cell["base_n"] == 2 and cell["position_max_px"] == 0.5
+
+
+def test_close_count_counts_real_close_commands(ready_config, table, tmp_path, sheet):
+    world = World(ready_config, table, tmp_path)
+    world._new_batch()
+    world.ctx.close_batch = 10**6
+    run_tolerance(world.ctx, sheet[:1])
+    closes = sum(1 for (_, grip, _), (_, prev, _) in zip(world.driver.writes[1:], world.driver.writes) if grip != prev and grip == ready_config.close_sdk)
+    assert world.arm.close_count == closes == 3
+
+
+@pytest.mark.parametrize("batch", [7, 10])
+def test_spread_batches_never_split_return_pairs(ready_config, table, tmp_path, batch):
+    from learned_grasp.tolerance import spread_sheet, summarize_spread
+
+    world = _spread_world(ready_config, table, tmp_path)
+    world.ctx.close_batch = batch
+    world.ctx.observer = lambda trial: Outcome(True, "변화 0.0500, 노란 화소 30")
+    world.spread(spread_sheet(ready_config, table))
+    summary = summarize_spread(world.ledger.records())
+    assert summary["trials"] == 42
+    assert all(c["return_n"] == 3 for c in summary["cells"].values())
+    assert summary["transfer"] == "verified"
+    assert all(c["base_n"] == 8 for c in summary["cells"].values())
+    records = world.ledger.records()
+    assert sum(1 for r in records if r["event"] == "note" and r.get("kind") == "warmup_pick") == world.batches
+    warm_frames = [r for r in records if r["event"] == "note" and r.get("kind") == "placement" and r["trial_id"].endswith("-w")]
+    assert len(warm_frames) == world.batches
