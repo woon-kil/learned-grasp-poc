@@ -251,22 +251,32 @@ def corrected_span(run, sheet, folder, hidden_per_call):
 
 
 def release_candidate(hidden_per_call):
-    """판정 실패 뒤 hover 이동과 개방. 후보값이고 실측이 아니다(플랜 125행)."""
+    """판정 실패 뒤 hover 이동과 개방. 후보값이고 실측이 아니다(플랜 125행).
+
+    블록을 쥔 채 park에 있는 상태(그리퍼 닫힘, 명령 없이 설정)에서 시작한다. 실제 시도의 pick_ 자세 전체(18변형)와
+    준비 순환·복귀 재집기의 P 자세에서 최대를 낸다. 구간의 팔 호출이 이동 write6+조회 read+개방 write_grip 3회인지 확인한다.
+    """
     config = load_config(Path(ROOT) / "config" / "workspace.yaml")
     table = table_for(config)
+    from learned_grasp.g0_runner import tolerance_variants
     from learned_grasp.safety import HOVER, PARK_POSE, Pose
 
+    poses = set()
+    for v in tolerance_variants(config, table):
+        poses.add((v["pick_r_index"], v["pick_j1"], v["pick_j5"]))
+        poses.add((v["r_index"], v["j1"], v["j5"]))
     worst = 0.0
-    for r_index in range(len(table.entries)):
+    for r_index, j1, j5 in sorted(poses):
         clock = Clock()
         driver = CountingFake()
         arm = SafeArm(driver, SafetyGate(config, table), sleep=clock.sleep)
         arm.goto(PARK_POSE)
-        arm.set_grip("open")
-        arm.set_grip("close") if False else None
+        arm.grip, arm.holding = config.close_sdk, True  # 쥔 채 park. 닫기 명령은 보내지 않는다
         before, calls0 = clock.now, driver.calls
-        arm.goto(Pose(HOVER, r_index, 90, 90))
+        arm.goto(Pose(HOVER, r_index, j1, j5))
         arm.set_grip("open")
+        assert driver.calls - calls0 == 3, driver.calls - calls0  # 이동, 조회, 개방
+        assert arm.grip == config.open_sdk and not arm.holding
         worst = max(worst, (clock.now - before) + hidden_per_call * (driver.calls - calls0))
     return worst
 

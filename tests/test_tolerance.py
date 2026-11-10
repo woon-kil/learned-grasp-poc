@@ -668,8 +668,8 @@ def test_resume_never_reuses_placement_frame_names(ready_config, table, tmp_path
     world.run(sheet[:1])
     frames = [r["frame"] for r in world.ledger.records() if r["event"] == "note" and r.get("kind") == "placement"]
     assert len(frames) == len(set(frames))
-    assert f"{trial['trial_id']}-w-p1-r2" in frames
-    photo_names = [n for n in world.camera.names if "-w-p1" in n]
+    assert f"{trial['trial_id']}-w-p1" in frames and f"{trial['trial_id']}-w2-p1" in frames  # 준비 순환 ID도 번호를 받는다
+    photo_names = [n for n in world.camera.names if "-w" in n and "p1" in n]
     assert len(photo_names) == len(set(photo_names)) == 2
 
 
@@ -686,3 +686,43 @@ def test_spread_reports_warmup_placements_inside_filter():
     place("n-c0-s0-w", 0, "spread", "plain", 0.5)
     place("n-c0-s2-w", 0, "spread", "plain", 9.0)
     assert summarize_spread(records)["cells"][0]["warmup_in_filter"] == [1, 2]
+
+
+def test_resume_does_not_overwrite_warmup_judge_photo(ready_config, table, tmp_path, sheet):
+    world = World(ready_config, table, tmp_path)
+    trial = sheet[0]
+    world.outcomes[f"{trial['trial_id']}-w"] = False
+    with pytest.raises(StopSession):
+        world.run(sheet[:1])
+    world.outcomes.clear()
+    world.run(sheet[:1])
+    warm_ids = [tid for tid, _ in world.judged if "-w" in tid]  # 판정 사진 이름은 `{id}-after`다
+    assert warm_ids == [f"{trial['trial_id']}-w", f"{trial['trial_id']}-w2"]
+
+
+def test_ledger_counters_sum_across_batches():
+    from learned_grasp.tolerance import ledger_counters
+
+    records = [
+        {"event": "note", "kind": "placement", "ok": True, "reloaded": False},
+        {"event": "note", "kind": "placement", "ok": False, "reloaded": False},
+        {"event": "note", "kind": "placement", "ok": True, "reloaded": True},
+        {"event": "note", "kind": "warmup_pick", "success": True},
+        {"event": "note", "kind": "warmup_pick", "success": False},
+        {"event": "note", "kind": "return_pick", "success": False},
+        {"event": "finish", "success": True},
+    ]
+    assert ledger_counters(records) == {"placements": 3, "placements_ok": 2, "reloads": 1, "warmup_picks": 2, "warmup_failures": 1, "return_picks": 1, "return_failures": 1}
+
+
+def test_committed_sheets_match_generators(ready_config, table):
+    """실행기가 기록에 묶는 시험표 해시가 커밋된 파일과 어긋나지 않는다(AGENTS: 시험표는 실행 전 커밋)."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from learned_grasp.config import ROOT
+    from learned_grasp.tolerance import sheet_sha256, spread_sheet
+
+    for name, fresh in (("sheet.json", tolerance_sheet(ready_config, table, 1)), ("spread-sheet.json", spread_sheet(ready_config, table))):
+        committed = _json.loads((_Path(ROOT) / "results" / "G0d" / name).read_text(encoding="utf-8"))
+        assert sheet_sha256(committed) == sheet_sha256(fresh), name

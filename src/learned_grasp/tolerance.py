@@ -358,11 +358,21 @@ def spread_sheet(config, table) -> list[dict]:
     return sheet
 
 
+def _warm_id(ctx: G0dContext, slot_id: str) -> str:
+    """준비 순환 시도 ID. 이어하기에서 같은 ID로 판정 사진(`{id}-after`)을 덮어쓰지 않게 번호를 붙인다."""
+    used = {r.get("trial_id") for r in ctx.ledger.records() if r["event"] == "note" and r.get("kind") == "placement"}
+    name, run = f"{slot_id}-w", 1
+    while name in used:
+        run += 1
+        name = f"{slot_id}-w{run}"
+    return name
+
+
 def _warmup(ctx: G0dContext, trial: dict) -> None:
     """적재 직후 같은 셀에서 놓기→P 집기를 한 번 더 한다. 다음 배치가 사람 적재가 아니라 일반 경로 다음이 되게 한다.
     시도로 세지 않지만 배치 확인, 판정, 기준 확인, 실패 경로는 같다. 실패면 G0d-0을 멈춘다.
     """
-    warm = {**trial, "trial_id": f"{trial['trial_id']}-w", "pick_r_index": trial["r_index"], "pick_j1": trial["j1"], "pick_j5": trial["j5"]}
+    warm = {**trial, "trial_id": _warm_id(ctx, trial["trial_id"]), "pick_r_index": trial["r_index"], "pick_j1": trial["j1"], "pick_j5": trial["j5"]}
     try:
         if _place_and_check(ctx, warm, filtered=False) is None:
             raise StopSession(f"{warm['trial_id']}: 준비 순환 배치 확인 2회 연속 실패")
@@ -465,6 +475,23 @@ def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> bool:
     return complete
 
 
+def ledger_counters(records: list[dict]) -> dict:
+    """묶음마다 새로 만드는 ctx 값이 아니라 장부에서 다시 센 합계. 최종 JSON에는 이 값을 쓴다(플랜 83·112행)."""
+    notes = [r for r in records if r["event"] == "note"]
+    placements = [r for r in notes if r.get("kind") == "placement"]
+    warm = [r for r in notes if r.get("kind") == "warmup_pick"]
+    ret = [r for r in notes if r.get("kind") == "return_pick"]
+    return {
+        "placements": len(placements),
+        "placements_ok": sum(1 for r in placements if r.get("ok")),
+        "reloads": sum(1 for r in placements if r.get("reloaded")),
+        "warmup_picks": len(warm),
+        "warmup_failures": sum(1 for r in warm if not r.get("success")),
+        "return_picks": len(ret),
+        "return_failures": sum(1 for r in ret if not r.get("success")),
+    }
+
+
 def _circular_mean_deg(values: list[float]) -> float:
     return math.degrees(math.atan2(sum(math.sin(math.radians(v)) for v in values), sum(math.cos(math.radians(v)) for v in values)))
 
@@ -500,7 +527,7 @@ def summarize_spread(records: list[dict]) -> dict:
         # 적재 직후 준비 순환 배치가 이 셀의 필터(기준±흩어짐 최대)를 얼마나 통과하는지. 1차는 이 배치에 필터를 쓰지 않는다.
         warm = []
         for r in records:
-            if r["event"] == "note" and r.get("kind") == "placement" and r.get("ok") and re.match(rf"n-c{cell}-.*-w$", r.get("trial_id", "")):
+            if r["event"] == "note" and r.get("kind") == "placement" and r.get("ok") and re.match(rf"n-c{cell}-.*-w\d*$", r.get("trial_id", "")):
                 m = r["measurement"]
                 warm.append(dev({"x": m["position"][0], "y": m["position"][1], "angle": m["angle"]}))
         cells[cell] = {

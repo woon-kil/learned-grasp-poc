@@ -339,7 +339,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["sheet", "summary"])
     parser.add_argument("--config", default="config/workspace.yaml")
-    parser.add_argument("--gate", choices=["G0a", "G0b", "G0d"], default="G0b")
+    parser.add_argument("--gate", choices=["G0a", "G0b", "G0d", "G0d-0"], default="G0b")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--sheet", type=Path)
@@ -354,6 +354,10 @@ def main() -> None:
         sheet = dryrun_sheet(config, table)
     elif args.gate == "G0d":
         sheet = tolerance_sheet(config, table, args.seed)
+    elif args.gate == "G0d-0":
+        from learned_grasp.tolerance import spread_sheet
+
+        sheet = spread_sheet(config, table)
     else:
         sheet = replay_sheet(config, table, args.seed)
     text = json.dumps(sheet, ensure_ascii=False, indent=1)

@@ -359,7 +359,7 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
     """G0d-0과 G0d 1차. 쉼 묶음마다 블록을 내려놓고 끝나며, 같은 명령을 다시 실행하면 이어서 한다."""
     import hashlib
 
-    from learned_grasp.tolerance import G0dContext, StopSession, filter_from_spread, run_natural_spread, run_tolerance, spread_sheet, summarize_spread
+    from learned_grasp.tolerance import G0dContext, StopSession, filter_from_spread, ledger_counters, run_natural_spread, run_tolerance, spread_sheet, summarize_spread
     from learned_grasp.top_marker import Placement, TopMarker
 
     marker = TopMarker()  # OpenCV 버전이 다르면 쓰기 전에 멈춘다
@@ -403,7 +403,7 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
                 try:
                     complete = run_natural_spread(ctx, spread_sheet(config, table))
                 finally:
-                    summary = summarize_spread(ctx.ledger.records()) | {"complete": complete, "end": end_kind(), "reference": binding["reference"], "counters": ctx.counters}
+                    summary = summarize_spread(ctx.ledger.records()) | {"complete": complete, "end": end_kind(), "reference": binding["reference"], "counters": ledger_counters(ctx.ledger.records())}
                     (folder / "spread.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
                     print(json.dumps(summary, ensure_ascii=False))
                     print(f"끝 종류: {summary['end']}")
@@ -416,7 +416,7 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
                     from learned_grasp.tolerance import variant_states
 
                     states = states if states is not None else variant_states(sheet, ctx.ledger.records())
-                    result = compute_tolerance(tolerance_variants(config, table), states, spread["transfer"]) | {"end": end_kind(), "counters": ctx.counters}
+                    result = compute_tolerance(tolerance_variants(config, table), states, spread["transfer"]) | {"end": end_kind(), "counters": ledger_counters(ctx.ledger.records())}
                     (folder / "tolerance.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
                     print(json.dumps(result, ensure_ascii=False))
                     print(f"끝 종류: {result['end']}")

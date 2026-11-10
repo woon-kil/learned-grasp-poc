@@ -56,7 +56,8 @@ def test_natural_spread_batches_fix_reference_and_feed_tolerance(wired, ready_co
     assert "쉼 묶음 끝" in capsys.readouterr().out
     reference = json.loads((folder / "reference.json").read_text())
     first = json.loads((folder / "spread.json").read_text())
-    assert first["complete"] is False and first["counters"]["batch_end"] and first["end"] == "batch"
+    assert first["complete"] is False and first["end"] == "batch"
+    assert first["counters"]["warmup_picks"] >= 1
     snaps_before = sum(c.names.count("reference") for c in Camera.instances)
     for _ in range(20):
         session.run_g0d("natural-spread", _arm(ready_config, table), ready_config, table, folder, "G0d-0", 5.0, None, None)
@@ -64,6 +65,10 @@ def test_natural_spread_batches_fix_reference_and_feed_tolerance(wired, ready_co
         if spread["complete"]:
             break
     assert spread["complete"] and spread["failures"] == 0 and spread["incomplete"] == 0 and spread["trials"] == 42 and spread["end"] == "complete"
+    ledger_notes = [r for r in map(json.loads, (folder / "spread.jsonl").read_text().splitlines()) if r["event"] == "note"]
+    warm_notes = [r for r in ledger_notes if r.get("kind") == "warmup_pick"]
+    assert spread["counters"]["warmup_picks"] == len(warm_notes) > first["counters"]["warmup_picks"]  # 묶음 값이 아니라 장부 합계
+    assert spread["counters"]["return_picks"] == 9 and spread["counters"]["return_failures"] == 0
     assert sum(c.names.count("reference") for c in Camera.instances) == snaps_before  # 기준을 다시 찍지 않는다
     assert json.loads((folder / "reference.json").read_text()) == reference
     meta = next(r for r in map(json.loads, (folder / "spread.jsonl").read_text().splitlines()) if r["event"] == "meta")
