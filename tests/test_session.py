@@ -715,3 +715,28 @@ def test_grip_max_does_not_step_up_when_already_lagging_at_close_sdk(ready_confi
     assert max(w[1] for w in fake.writes) == close  # 레벨을 올리지 않았다
     assert [w[1] for w in fake.writes][-3:] == [ready_config.open_sdk] * 3 and arm.pose == PARK_POSE
     assert ledger[-1]["reason"].startswith("close_sdk에서 이미 판독이 뒤짐")
+
+
+def test_dabai_view_uses_requested_j1(ready_config, tmp_path):
+    arm, fake = _dabai_arm(ready_config)
+    signal = tmp_path / "dabai_next"
+    lines = []
+    run_dabai_view(arm, signal, sleep=_signaling_sleep(signal, lines), clock=lambda: 0.0, log=lambda line, **k: lines.append(line), j1=70)
+    assert [w[0][0] for w in fake.writes] == [ready_config.park[0], 70, 70, 70, ready_config.park[0]]  # J1 70에서 hover, grasp, hover
+    assert len(fake.writes) == 5 and arm.pose == PARK_POSE
+
+
+def test_dabai_view_rejects_j1_outside_range(ready_config, tmp_path):
+    arm, fake = _dabai_arm(ready_config)
+    with pytest.raises(SafetyViolation):
+        run_dabai_view(arm, tmp_path / "dabai_next", sleep=lambda _: None, clock=lambda: 0.0, log=lambda *a, **k: None, j1=60)
+    assert len(fake.writes) == 1  # park만 나갔고 hover로 가기 전에 거절
+
+
+def test_dabai_view_cli_rejects_j1_on_other_commands(monkeypatch, tmp_path):
+    from learned_grasp import session
+
+    monkeypatch.setattr("sys.argv", ["session", "read", "--session", str(tmp_path / "approval.json"), "--j1", "70"])
+    with pytest.raises(SystemExit) as info:
+        session.main()
+    assert "--j1은 dabai-view에서만" in str(info.value)
