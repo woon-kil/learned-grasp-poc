@@ -202,6 +202,13 @@ def sheet_sha256(sheet: list[dict]) -> str:
     return hashlib.sha256(json.dumps(sheet, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def _refuse_after_misjudge(ledger: AttemptLedger) -> None:
+    """판정 실패에 held(실제로 쥠)가 한 번이라도 있으면 같은 판정값으로 잇지 않는다(플랜 121행: 판정값 재검토)."""
+    held = [r["trial_id"] for r in ledger.records() if r["event"] == "note" and r.get("kind") == "failure_answer" and r.get("answer") == "held"]
+    if held:
+        raise StopSession(f"오판정 기록 {held}. 판정값을 재검토하기 전에는 이어서 하지 않는다")
+
+
 def run_tolerance(ctx: G0dContext, sheet: list[dict]) -> dict[str, dict]:
     """G0d 1차. 종결된 변형의 남은 자리와 이미 쓴 시도 ID는 건너뛴다. StopSession이면 그 자리에서 끝난다.
 
@@ -211,6 +218,7 @@ def run_tolerance(ctx: G0dContext, sheet: list[dict]) -> dict[str, dict]:
     if arm.close_watch is None:
         raise ValueError("G0d는 닫힘 한도 감시가 필요하다")
     _bind(arm, ledger, ctx.table, sheet_sha256=sheet_sha256(sheet), **ctx.binding)
+    _refuse_after_misjudge(ledger)
     ledger.close_interrupted()
     arm.goto(PARK_POSE)
     arm.set_grip("open")
@@ -280,7 +288,7 @@ YELLOW_HOLD_MAX = 52  # 판정값 재계획 플랜 v3: 집기 성공 사진 노�
 
 
 def spread_sheet(config, table) -> list[dict]:
-    """일반 경로 24회(셀 고정 순서 교차) 뒤 경로 비교 18회(셀마다 복귀·일반 교차 3번). 복귀는 r 최소 단계 c*-r+를 쓴다."""
+    """일반 경로 24회(셀 고정 순서 교차) 뒤 경로 비교 18회(셀마다 복귀·일반 교차 3번). 복귀는 셀마다 |δ| 최소 r 단계다."""
     from learned_grasp.g0_runner import tolerance_variants
 
     variants = {v["variant_id"]: v for v in tolerance_variants(config, table)}
@@ -293,8 +301,9 @@ def spread_sheet(config, table) -> list[dict]:
         for cell in range(3):
             sheet.append({**plain[cell], "trial_id": f"n-c{cell}-s{rep}", "path": "plain", "phase": "spread"})
     # 복귀 경로의 효과는 같은 셀에 다시 놓은 사진으로 본다. 셀마다 복귀 다음에 일반을 두어 복귀 뒤 배치가 같은 셀이 되게 한다.
+    # P+δ는 플랜 76행대로 그 셀의 r 단계 중 |δ|가 가장 작은 것이다(셀 0은 r−, r_index 0 자리).
     for cell in range(3):
-        ret = variants[f"c{cell}-r+"]
+        ret = min((variants[f"c{cell}-r-"], variants[f"c{cell}-r+"]), key=lambda v: abs(v["model_offset"]))
         for rep in range(COMPARE_REPEATS):
             sheet.append({**{k: ret[k] for k in ("cell", "r_index", "j1", "j5", "pick_r_index", "pick_j1", "pick_j5", "model_offset")}, "trial_id": f"n-c{cell}-r{rep}", "path": "return", "phase": "compare"})
             sheet.append({**plain[cell], "trial_id": f"n-c{cell}-p{rep}", "path": "plain", "phase": "compare"})
@@ -306,15 +315,20 @@ def _warmup(ctx: G0dContext, trial: dict) -> None:
     시도로 세지 않지만 배치 확인, 판정, 기준 확인, 실패 경로는 같다. 실패면 G0d-0을 멈춘다.
     """
     warm = {**trial, "trial_id": f"{trial['trial_id']}-w", "pick_r_index": trial["r_index"], "pick_j1": trial["j1"], "pick_j5": trial["j5"]}
-    if _place_and_check(ctx, warm) is None:
-        raise StopSession(f"{warm['trial_id']}: 준비 순환 배치 확인 2회 연속 실패")
-    _pick(ctx.arm, warm)
-    ctx.arm.goto(PARK_POSE)
-    outcome = _judge(ctx, warm)
-    ctx.ledger.note("warmup_pick", trial_id=trial["trial_id"], success=outcome.success, reason=outcome.reason)
-    if not outcome.success:
-        _failure_path(ctx, warm, "", counted=False)
-        raise StopSession(f"{warm['trial_id']}: 준비 순환 집기 실패. 마커 영향을 재검토한다")
+    try:
+        if _place_and_check(ctx, warm) is None:
+            raise StopSession(f"{warm['trial_id']}: 준비 순환 배치 확인 2회 연속 실패")
+        _pick(ctx.arm, warm)
+        ctx.arm.goto(PARK_POSE)
+        outcome = _judge(ctx, warm)
+        ctx.ledger.note("warmup_pick", trial_id=trial["trial_id"], success=outcome.success, reason=outcome.reason)
+        if not outcome.success:
+            _failure_path(ctx, warm, "", counted=False)
+            raise StopSession(f"{warm['trial_id']}: 준비 순환 집기 실패. 마커 영향을 재검토한다")
+    except StopSession as error:
+        # 시도는 아니지만 G0d-0의 「실패 1건이면 1차 금지」에 들어간다. 이어하기를 막도록 남긴다.
+        ctx.ledger.note("incomplete", trial_id=warm["trial_id"], reason=f"준비 순환 정지: {error}")
+        raise
 
 
 def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> bool:
@@ -329,6 +343,7 @@ def run_natural_spread(ctx: G0dContext, sheet: list[dict]) -> bool:
     if ctx.placement_filter is not None:
         raise ValueError("G0d-0은 배치 필터 없이 돈다")
     _bind(arm, ledger, ctx.table, sheet_sha256=sheet_sha256(sheet), **ctx.binding)
+    _refuse_after_misjudge(ledger)
     if ledger.close_interrupted():
         raise StopSession("G0d-0은 중단된 시도 뒤로 잇지 않는다. 새 기록으로 다시 시작한다")
     finished, _ = ledger.state()
@@ -438,11 +453,14 @@ def summarize_spread(records: list[dict]) -> dict:
     successes = [r.get("reason", "") for r in records if (r["event"] == "finish" and r.get("success")) or (r["event"] == "note" and r.get("kind") in ("return_pick", "warmup_pick") and r.get("success"))]
     yellow = [int(m.group(1)) for reason in successes if (m := re.search(r"노란 화소 (\d+)", reason))]
     finishes = [r for r in records if r["event"] == "finish"]
+    side_failures = sum(1 for r in records if r["event"] == "note" and r.get("kind") in ("return_pick", "warmup_pick") and not r.get("success"))
+    incomplete = sum(1 for r in records if r["event"] == "note" and r.get("kind") == "incomplete")
     return {
         "cells": cells,
         "transfer": "verified" if len(cells) == 3 and all(c["return_outside"] == 0 and c["return_n"] == COMPARE_REPEATS for c in cells.values()) else "unverified",
         "trials": len(finishes),
-        "failures": sum(1 for r in finishes if not r.get("success")),
+        "failures": sum(1 for r in finishes if not r.get("success")) + side_failures,
+        "incomplete": incomplete,
         "yellow_max_success": max(yellow) if yellow else None,
         "yellow_ok": bool(yellow) and max(yellow) <= YELLOW_HOLD_MAX,
     }

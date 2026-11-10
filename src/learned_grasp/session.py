@@ -370,7 +370,7 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
             raise SystemExit("tolerance는 --sheet와 --spread가 필요하다")
         raw = spread_path.read_bytes()
         spread = json.loads(raw)
-        if not (spread.get("complete") and spread.get("failures") == 0 and spread.get("yellow_ok")):
+        if not (spread.get("complete") and spread.get("failures") == 0 and spread.get("incomplete") == 0 and spread.get("yellow_ok")):
             raise SystemExit("G0d-0이 완결·무실패·노란 화소 기준을 채우지 않아 G0d 1차로 가지 않는다")
         binding["spread_sha256"] = hashlib.sha256(raw).hexdigest()
     camera = P620Camera(f"runs/{session_id}/frames")

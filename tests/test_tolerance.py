@@ -404,7 +404,7 @@ def test_return_stop_marks_variant_incomplete_for_resume(ready_config, table, tm
     world = World(ready_config, table, tmp_path)
     trial = sheet[0]
     world.outcomes[f"{trial['trial_id']}-ret"] = False
-    world.answers[("failure", f"{trial['trial_id']}-ret")] = "held"
+    world.answers[("failure", f"{trial['trial_id']}-ret")] = "unknown"
     with pytest.raises(StopSession):
         world.run(sheet)
     states = variant_states(sheet, world.ledger.records())
@@ -511,3 +511,44 @@ def test_spread_batches_never_split_return_pairs(ready_config, table, tmp_path, 
     assert sum(1 for r in records if r["event"] == "note" and r.get("kind") == "warmup_pick") == world.batches
     warm_frames = [r for r in records if r["event"] == "note" and r.get("kind") == "placement" and r["trial_id"].endswith("-w")]
     assert len(warm_frames) == world.batches
+
+
+def test_warmup_failure_blocks_resume_and_counts_as_failure(ready_config, table, tmp_path):
+    from learned_grasp.tolerance import run_natural_spread, spread_sheet, summarize_spread
+
+    world = _spread_world(ready_config, table, tmp_path)
+    sheet = spread_sheet(ready_config, table)
+    world.outcomes[f"{sheet[0]['trial_id']}-w"] = False
+    with pytest.raises(StopSession, match="준비 순환"):
+        world.spread(sheet)
+    summary = summarize_spread(world.ledger.records())
+    assert summary["failures"] >= 1 and summary["incomplete"] >= 1
+    again = _spread_world(ready_config, table, tmp_path)
+    again._new_batch()
+    with pytest.raises(StopSession, match="실패나 미완료"):
+        run_natural_spread(again.ctx, sheet)
+    assert not again.driver.writes
+
+
+@pytest.mark.parametrize("spread_run", [False, True])
+def test_held_answer_blocks_any_resume(ready_config, table, tmp_path, sheet, spread_run):
+    from learned_grasp.tolerance import run_natural_spread, spread_sheet
+
+    world = _spread_world(ready_config, table, tmp_path) if spread_run else World(ready_config, table, tmp_path)
+    target = spread_sheet(ready_config, table) if spread_run else sheet
+    world.outcomes[target[0]["trial_id"]] = False
+    world.answers[("failure", target[0]["trial_id"])] = "held"
+    with pytest.raises(StopSession):
+        world.spread(target) if spread_run else world.run(target)
+    again = World(ready_config, table, tmp_path)
+    again._new_batch()
+    with pytest.raises(StopSession, match="오판정"):
+        run_natural_spread(again.ctx, target) if spread_run else run_tolerance(again.ctx, target)
+    assert not again.driver.writes
+
+
+def test_spread_return_uses_smallest_r_step_per_cell(ready_config, table):
+    from learned_grasp.tolerance import spread_sheet
+
+    picks = {t["cell"]: (t["pick_r_index"], t["model_offset"]) for t in spread_sheet(ready_config, table) if t["path"] == "return"}
+    assert picks == {0: (0, -4.29), 1: (5, 4.398), 2: (8, 3.951)}
