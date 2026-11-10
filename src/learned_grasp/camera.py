@@ -7,6 +7,7 @@ import os
 import select
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 
@@ -20,6 +21,7 @@ class Camera(Protocol):
     def snapshot(self, name: str) -> Snapshot: ...
     def change(self, before: str, after: str, roi: tuple[int, int, int, int]) -> float: ...
     def yellow_pixels(self, name: str, roi: tuple[int, int, int, int]) -> int: ...
+    def fetch(self, name: str) -> Path: ...
 
 
 class FakeCamera:
@@ -27,6 +29,7 @@ class FakeCamera:
         self.clock = clock
         self.names: list[str] = []
         self.fail_next = False
+        self.photos: dict[str, Path] = {}
 
     def snapshot(self, name: str) -> Snapshot:
         if self.fail_next:
@@ -42,6 +45,12 @@ class FakeCamera:
         """시험용. 보드에 노란색이 없음을 돌려준다."""
         return self.yellow_value
 
+    def fetch(self, name: str) -> Path:
+        """시험용. photos[name]에 넣어 둔 경로를 돌려준다. 없으면 가져오기 실패다."""
+        if name not in self.photos:
+            raise FileNotFoundError(name)
+        return self.photos[name]
+
     change_value = 1.0
     yellow_value = 0
 
@@ -56,6 +65,7 @@ class P620Camera:
             f'cd projects/learned-grasp-poc && bash scripts/p620_camera.sh serve "$PWD/{output}"',
         ]
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.host, self.output = host, output
         self._read(timeout_s=90.0)
 
     def _read(self, timeout_s: float) -> dict:
@@ -84,6 +94,19 @@ class P620Camera:
 
     def yellow_pixels(self, name: str, roi: tuple[int, int, int, int]) -> int:
         return self._call({"op": "yellow", "name": name, "roi": list(roi)})["pixels"]
+
+    def fetch(self, name: str, timeout_s: float = 10.0) -> Path:
+        """찍은 사진을 Mac의 같은 상대 경로로 가져온다. 측정은 Mac 고정 OpenCV로만 한다."""
+        local = Path(self.output) / f"{name}.color.png"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        source = f"{self.host}:projects/learned-grasp-poc/{self.output}/{name}.color.png"
+        try:
+            done = subprocess.run(["scp", "-q", "-o", "BatchMode=yes", source, str(local)], timeout=timeout_s)
+        except subprocess.TimeoutExpired as error:
+            raise FileNotFoundError(f"사진 가져오기 {timeout_s:g}초 초과: {name}") from error
+        if done.returncode != 0:
+            raise FileNotFoundError(f"사진 가져오기 실패: {name}")
+        return local
 
     def close(self) -> None:
         try:

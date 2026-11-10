@@ -5,7 +5,11 @@ description = "DOFBOT Pro 자기 지도 파지 학습 PoC"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = ["numpy>=1.26", "pyyaml>=6"]
+dependencies = [
+    "numpy>=1.26",
+    "opencv-contrib-python-headless==5.0.0.93",
+    "pyyaml>=6",
+]
 
 [dependency-groups]
 dev = ["pytest>=8"]
