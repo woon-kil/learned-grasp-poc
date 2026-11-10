@@ -17,10 +17,11 @@
     <text x="278" y="500" font-size="17" fill="#555">팔(직립)</text>
     <!-- 그리퍼: z 366~456 (모델), 스케일 1 px = 1 mm, z=0 -> y=720 -->
     <rect x="240" y="264" width="40" height="90" rx="4" fill="#c98f1a" fill-opacity="0.75" stroke="#7a5d1f"/>
-    <text x="290" y="300" font-size="17" fill="#7a5d1f">그리퍼(모델상 끝 z 456 mm)</text>
-    <text x="290" y="326" font-size="17" fill="#a00">그리퍼 끝(렌즈 위 약 100 mm)보다</text>
-    <text x="290" y="348" font-size="17" fill="#a00">높게 든다. 150 mm 미만은</text>
-    <text x="290" y="370" font-size="17" fill="#a00">이 자세에서 측정하지 않는다</text>
+    <text x="290" y="300" font-size="17" fill="#7a5d1f">모델 TCP z 456 mm(개폐와 무관)</text>
+    <text x="290" y="316" font-size="14" fill="#7a5d1f">실제 손끝 높이는 미측정, 지금은 열린 상태(SDK 100)</text>
+    <text x="290" y="344" font-size="17" fill="#a00">모델 TCP(렌즈 위 약 100 mm)보다</text>
+    <text x="290" y="366" font-size="17" fill="#a00">높게 든다. 150 mm 미만은</text>
+    <text x="290" y="388" font-size="17" fill="#a00">이 자세에서 측정하지 않는다</text>
     <!-- DaBai: y=-51 (왼쪽), z=357 -> (260-51, 720-357) -->
     <rect x="198" y="352" width="24" height="22" fill="#1f5fd1"/>
     <text x="190" y="346" font-size="17" font-weight="bold" fill="#1f5fd1" text-anchor="end">DaBai 렌즈 (z 357 mm)</text>
