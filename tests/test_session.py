@@ -1203,3 +1203,32 @@ def test_empty_hand_failure_never_redescends_to_grasp_in_p1(ready_config, tmp_pa
     gate = SafetyGate(ready_config, table)
     after = [tuple(w[0]) for w in _writes_after_close(fake, ready_config)]
     assert tuple(gate.joints(Pose(GRASP, 4, 80, 90))) not in after
+
+
+def test_chain_x1_place_j5_schedule_and_human_placed_flag(ready_config, tmp_path):
+    from learned_grasp.l1 import YawModel
+
+    yaw = YawModel()
+    rows = _rows(ready_config)
+    cells = [{"r_index": 5, "j1": 90}, {"r_index": 4, "j1": 80}]
+    first = _aligned(85.0, rows[4], 4, 90)
+    second = _aligned(90.0, rows[5], 5, 66)  # 첫 시도가 J5 66으로 놓은 블록
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [first, second], cells, 2, signals=9, align=True, place_j5_schedule=[66, None])
+    assert error is None, error
+    s1, s2 = [r for r in ledger.records() if r.get("event") == "start"]
+    assert s1["place_j5"] == 66 and s2["place_j5"] == yaw.place_j5(80, 4)  # null이면 정렬 놓기
+    assert 66 in {w[0][4] for w in fake.writes} and s1["human_placed"] is False
+    assert abs(s2["pick_j5"] - 66) <= 1  # 극단으로 놓인 블록을 극단 J5로 집었다
+
+
+def test_chain_marks_block_placed_by_human_after_rejection(ready_config, tmp_path):
+    table = generate(ready_config.table)
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
+    bad = _aligned(85.0, table.entries[4].r_mm, 4, 90)
+    bad["block_angle_deg"] = (bad["block_angle_deg"] + 50.0) % 180.0  # J5가 범위를 크게 넘는 방향 → 거절
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [bad], cells, 1, align=True)
+    assert isinstance(error, NeedHuman)
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_aligned(85.0, table.entries[4].r_mm, 4, 90)], cells, 1, ledger=ledger, align=True)
+    assert error is None
+    start = [r for r in ledger.records() if r.get("event") == "start"][0]
+    assert start["human_placed"] is True and start["placed_at"] is None

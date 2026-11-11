@@ -102,3 +102,16 @@ def test_place_j5_is_clamped_and_matches_model(yaw):
         j5 = yaw.place_j5(j1, r_idx)
         assert 60 <= j5 <= 120 and abs(yaw.hand_d(j5, j1, r_idx)) < 0.6
     assert yaw.place_j5(104, 8) < 90  # 모델은 (8, 104)에서 손이 +8°라 J5를 줄인다
+
+
+def test_plan_aligned_clamps_only_within_margin(l1, table, yaw):
+    r = table.entries[4].r_mm
+    m = _aligned_measurement(l1, yaw, 90, r, 4, 90)
+    base = (l1.radial_angle_deg(90, r) + yaw.hand_d(90, 90, 4)) % 180.0
+    # J5 약 58(범위 60보다 2° 아래)이 되는 방향
+    near = dict(m, block_angle_deg=float((l1.radial_angle_deg(90, r) + yaw.hand_d(58, 90, 4)) % 180.0))
+    far = dict(m, block_angle_deg=float((l1.radial_angle_deg(90, r) + yaw.hand_d(52, 90, 4)) % 180.0))
+    assert not plan_aligned(near, table, l1, yaw).accept  # 기본은 거절
+    p = plan_aligned(near, table, l1, yaw, j5_clamp_margin=4.0)
+    assert p.accept and p.clamped and p.j5 == 60
+    assert not plan_aligned(far, table, l1, yaw, j5_clamp_margin=4.0).accept  # 8° 초과는 margin 밖이라 거절

@@ -497,12 +497,15 @@ def run_chain(
     offsets: list[int] | None = None,
     escalate: bool = False,
     continue_on_miss: bool = False,
+    place_j5_schedule: list[int | None] | None = None,
+    j5_clamp_margin: float = 0.0,
 ) -> None:
     """연쇄 종단 시험. park 사진 → L1이 고른 자리에서 집기 → park → 목록의 다음 자리에 내려놓기를 count번 이어 간다.
 
     사람은 시작 때 블록을 놓고, **이 실행의 첫 집기 하강 전에만** 확인 신호(signal)를 보낸다(사용자 결정 2026-11-11: 그 뒤는 전원 차단으로 감독). confirm_each면 집기·내려놓기마다 받는다. 닫기 rest_every번마다 rest_s초 쉰다(그리퍼 쉼, 쓰기 없음). stop 파일이 있으면 시도 사이(팔 park, 손 열림, 블록 보드 위)나 쉼 중에 쓰기 없이 멈춘다. 시도 중에는 전원 차단뿐이다. 실패·중단 기록은 사람이 확인(ledger note acknowledged)해야 이어 간다. 다음 시도의 입력 사진은 직전 내려놓기 뒤의 park 사진이다.
     align면 J5로 손을 블록 방향에 맞추고(plan_aligned) 놓는 자리에서도 J5로 손을 반경선에 맞춘다(YawModel). J5 ≠ 90 하강은 처음 한 번씩만 확인한다.
     offsets(R1 반경 허용 측정)면 k번째 시도는 L1 행에서 offsets[k-1]행 옮겨 집고(실제 행은 0~9로 자른다), 블록이 공칭 자리 근처에 놓이도록 놓는 손 행을 공칭 행 + 실제 오프셋으로 한다. J5는 실제 행으로 다시 계산한다.
+    place_j5_schedule(X1)이 있으면 k번째 시도의 놓기 J5를 그 값으로 한다(None이면 정렬 J5). j5_clamp_margin은 plan_aligned에 넘겨 범위 끝 이내로 벗어난 J5를 자른다. 중간 거절 뒤 사람이 다시 놓은 시도는 human_placed로 기록한다.
     escalate면 |J5−90|이 이전 확인 최대보다 10° 이상 커질 때, 처음 오프셋 3 집기·처음 오프셋 놓기에도 확인을 받는다. continue_on_miss(R1 전용)면 빈 손(서보 > 기준)으로 실패한 시도 뒤에도 이어 간다(다음 사진·L1이 받아들이지 않으면 멈춘다).
     성공 = P1과 같다(관찰기 그리고 서보 6 판독). L1이 거절(검출 실패, 구역·방향 밖)하거나 시도가 실패하거나 확인 신호가 없으면
     쓰기 없이(실패면 P1처럼 같은 자리에 도로 놓고) 멈춘다. 자동 복구 이동은 없다. cells[k-1]이 k번째 시도의 내려놓을 자리다.
@@ -543,7 +546,7 @@ def run_chain(
         frame = tid if rejected_before == 0 else f"{tid}-r{rejected_before}"  # 거절된 사진을 덮어쓰지 않는다
         camera.snapshot(frame)  # 블록이 보드에 있고 팔은 park일 때의 사진
         measured = measure(camera.fetch(frame))
-        planned = plan_aligned(measured, table, yaw=yaw) if align else plan(measured, table)
+        planned = plan_aligned(measured, table, yaw=yaw, j5_clamp_margin=j5_clamp_margin) if align else plan(measured, table)
         if not planned.accept:
             ledger.note("rejected", trial_id=tid, **planned.asdict())
             raise NeedHuman(f"{tid}: L1이 시도하지 않는다({planned.reason}). 사람이 블록을 확인한다")
@@ -559,8 +562,11 @@ def run_chain(
             pick_j5 = int(round(wanted))
         place_row = min(max(nxt["r_index"] + delta_actual, 0), n_rows - 1)
         place_j5 = yaw.place_j5(nxt["j1"], place_row) if align else 90
+        if align and place_j5_schedule and place_j5_schedule[k - 1] is not None:
+            place_j5 = int(place_j5_schedule[k - 1])
         trial = {"trial_id": tid, "r_index": r_pick, "j1": planned.j1, "j5": pick_j5, "before_frame": frame}
-        previous = cells[k - 2] if k > 1 and last_success else None  # 직전 시도가 이 블록을 내려놓은 자리(성공일 때만 알 수 있다)
+        human_placed = rejected_before > 0  # L1 거절 뒤 사람이 다시 놓은 블록은 팔이 만든 방향이 아니다
+        previous = cells[k - 2] if k > 1 and last_success and not human_placed else None  # 직전 시도가 이 블록을 내려놓은 자리(성공일 때만 알 수 있다)
         same_cell = previous is not None and (previous["r_index"], previous["j1"]) == (planned.r_index, planned.j1)  # L1이 고른 자리 기준(오프셋 전)
         hover = Pose(HOVER, r_pick, planned.j1, pick_j5)
         grasp = Pose(GRASP, r_pick, planned.j1, pick_j5)
@@ -568,7 +574,7 @@ def run_chain(
             arm.goto(PARK_POSE)
         arm.goto(hover)
         ledger.start(trial, joints_grasp=arm.gate.joints(grasp), joints_hover=arm.gate.joints(hover), plan=planned.asdict(), place_at={"r_index": nxt["r_index"], "j1": nxt["j1"]}, placed_at=previous, same_cell=same_cell, pick_j5=pick_j5, place_j5=place_j5,
-                     offset=delta_actual, r_l1=planned.r_index, r_pick=r_pick, place_row=place_row)
+                     offset=delta_actual, r_l1=planned.r_index, r_pick=r_pick, place_row=place_row, human_placed=human_placed, clamped=planned.clamped if align else False)
         need_j5 = align and pick_j5 != 90 and not confirmed_j5["pick"]
         dev_pick = abs(pick_j5 - 90)
         need_esc = escalate and ((conf["dev"] is not None and dev_pick >= conf["dev"] + 10) or (abs(delta_actual) >= 3 and not conf["off_pick"]))
@@ -882,6 +888,7 @@ def main() -> None:
     parser.add_argument("--rest-sec", type=float, default=300.0, help="chain: 쉬는 시간(초)")
     parser.add_argument("--ack", help="chain: 실패·중단한 시도 id를 사람이 확인했다고 기록하고 이어 간다(예: chain-012)")
     parser.add_argument("--r1", type=Path, help="chain: R1 일정 JSON(scripts/r1_cells.py: cells, offsets). 오프셋·확인 상승·빈 손 실패 이어 가기를 함께 켠다")
+    parser.add_argument("--x1", type=Path, help="chain: X1 일정 JSON(scripts/x1_schedule.py: cells, place_j5). J5 극단 놓기·확인 상승·범위 끝 4° 자르기를 켠다")
     parser.add_argument("--align", action="store_true", help="chain: J5로 손을 블록 방향(집기)·반경선(놓기)에 맞춘다(config/l1_yaw.json)")
     parser.add_argument("--j5", type=int, help="release-here: 멈춘 grasp 자세의 J5. p1-pick: 이 시도의 J5(P2: 있으면 J5 확인 상승·비틀림 사진 모드)")
     parser.add_argument("--hover-only", action="store_true", help="dabai-view: hover에서 신호 뒤 grasp 없이 park로 돌아온다")
@@ -930,8 +937,8 @@ def main() -> None:
         raise SystemExit("p1-pick은 --r-index, --j1, --trial이 필요하다")
     if args.command == "release-here" and (args.r_index is None or args.j1 is None or args.j5 is None):
         raise SystemExit("release-here는 --r-index, --j1, --j5가 필요하다")
-    if args.command == "chain" and ((args.cells is None and args.r1 is None) or args.count is None or args.count < 1):
-        raise SystemExit("chain은 --cells(또는 --r1)와 1 이상의 --count가 필요하다")
+    if args.command == "chain" and ((args.cells is None and args.r1 is None and args.x1 is None) or args.count is None or args.count < 1):
+        raise SystemExit("chain은 --cells(또는 --r1, --x1)와 1 이상의 --count가 필요하다")
     if args.command == "grip-max":
         if args.z_offset != 15 or args.r_index is None:
             raise SystemExit("grip-max는 --z-offset 15와 --r-index가 필요하다")
@@ -996,9 +1003,10 @@ def main() -> None:
                     raise FileNotFoundError(f"사진을 읽지 못했다: {path}")
                 return block_from_image(image, board_ref)
 
-            schedule = json.loads((args.r1 or args.cells).read_text(encoding="utf-8"))
+            schedule = json.loads((args.r1 or args.x1 or args.cells).read_text(encoding="utf-8"))
             cells = schedule["cells"]
             offsets = schedule["offsets"] if args.r1 else None
+            place_schedule = schedule["place_j5"] if args.x1 else None
             chain_ledger = AttemptLedger(folder / "chain.jsonl")
             if args.ack:
                 chain_ledger.close_interrupted()  # 끝나지 않은 시도(프로세스가 예외로 끝남)를 먼저 중단으로 닫아야 확인 대상이 된다
@@ -1010,8 +1018,9 @@ def main() -> None:
             try:
                 run_chain(arm, camera, make_pick_observer(camera), chain_ledger, config, table, cells, args.count,
                           folder / "dabai_next", measure, min(args.hold_sec or 5.0, 60.0),
-                          confirm_each=args.confirm_each, rest_every=args.rest_every, rest_s=args.rest_sec, stop=folder / "chain_stop", align=args.align or args.r1 is not None,
-                          offsets=offsets, escalate=args.r1 is not None, continue_on_miss=args.r1 is not None)
+                          confirm_each=args.confirm_each, rest_every=args.rest_every, rest_s=args.rest_sec, stop=folder / "chain_stop", align=args.align or args.r1 is not None or args.x1 is not None,
+                          offsets=offsets, escalate=args.r1 is not None or args.x1 is not None, continue_on_miss=args.r1 is not None,
+                          place_j5_schedule=place_schedule, j5_clamp_margin=4.0 if args.x1 else 0.0)
             finally:
                 camera.close()
         elif args.command == "grip-max":

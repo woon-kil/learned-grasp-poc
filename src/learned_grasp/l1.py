@@ -40,6 +40,7 @@ class Plan:
     block_angle_deg: float | None = None
     j5: int | None = None  # plan_aligned만 채운다(plan은 J5 90)
     d_deg: float | None = None  # 반경선 대비 부호 있는 블록 각도(plan_aligned)
+    clamped: bool = False  # J5 범위 끝에서 margin 안으로 잘랐는가(plan_aligned)
 
     def asdict(self) -> dict:
         return {k: (round(v, 3) if isinstance(v, float) else v) for k, v in self.__dict__.items()}
@@ -183,10 +184,10 @@ class YawModel:
         return int(min(max(round(self.j5_for(0.0, j1, r_index)), J5_RANGE[0]), J5_RANGE[1]))
 
 
-def plan_aligned(measured: dict | None, table: PoseTable, l1: L1Map | None = None, yaw: YawModel | None = None) -> Plan:
+def plan_aligned(measured: dict | None, table: PoseTable, l1: L1Map | None = None, yaw: YawModel | None = None, j5_clamp_margin: float = 0.0) -> Plan:
     """J5로 손을 블록 방향에 맞춘 계획. (r_index, J1, J5)와 정렬 뒤 예상 잔여 어긋남(psi_deg)을 낸다.
 
-    J5와 위치 역변환이 서로 영향을 주므로 고정점 반복(최대 5회)한다. 보정한 J5가 범위 밖이면 자르지 않고 거절한다.
+    J5와 위치 역변환이 서로 영향을 주므로 고정점 반복(최대 5회)한다. 보정한 J5가 범위 밖이면 자르지 않고 거절한다. 단 j5_clamp_margin(X1 한정)도 이내로 벗어나면 범위 끝으로 자르고 clamped를 남긴다.
     psi_deg는 모델이 말하는 정렬 뒤 잔여(J5 반올림만)라 실제 어긋남이 아니다. 실제는 모델 오차(포즈 단위 LOO 약 3.9° 상한)만큼 더 크다.
     """
     if measured is None:
@@ -217,7 +218,10 @@ def plan_aligned(measured: dict | None, table: PoseTable, l1: L1Map | None = Non
         j5 = j5_new
     else:
         return Plan(False, "J5 정렬이 수렴하지 않았다", r_index=r_index, j1=j1, **base)
-    if not (J5_RANGE[0] <= int(round(wanted)) <= J5_RANGE[1]):
+    over = max(J5_RANGE[0] - wanted, wanted - J5_RANGE[1], 0.0)
+    if over > 0 and over <= j5_clamp_margin:
+        base["clamped"] = True  # 반복 중 j5는 이미 범위 끝으로 잘려 있다
+    elif not (J5_RANGE[0] <= int(round(wanted)) <= J5_RANGE[1]):
         return Plan(False, f"J5 보정 {wanted:.0f}이 범위 {J5_RANGE} 밖(d {d:+.1f}°). 사람이 블록 방향을 확인한다", r_index=r_index, j1=j1, **base)
     j1c, rc, res = l1.inverse(measured["du"], measured["dv"], (r_lo, r_hi), float(j5))
     base.update(j1_cont=j1c, r_cont=rc, residual_px=res, j5=j5)
