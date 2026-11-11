@@ -36,7 +36,7 @@ def main() -> None:
     rng = np.random.default_rng(20261112)
     mean_hand = np.array([yaw.hand_d(90, c["j1"], c["r_index"]) for c in cells])
     print(f"창 m(ψ): ψ0 {window(0):.2f}, 3° {window(3):.2f}, 5° {window(5):.2f}, 8° {window(8):.2f}, 10° {window(10):.2f}, 14° {window(14):.2f} mm. 횡방향 σ {LAT_SIGMA} mm")
-    for model_err in (2.5, 3.9):
+    for model_err in (2.5, 3.9, 5.5):
         idx = rng.integers(0, len(cells), N)
         base = mean_hand[idx] + rng.normal(0, model_err, N)  # J5 90: 손이 반경선과 어긋남 + 모델 오차(손 yaw 불확실)
         aligned = rng.normal(0, math.sqrt(model_err**2 + MEAS_SIGMA**2 + ROUND**2), N)
