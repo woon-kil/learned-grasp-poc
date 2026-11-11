@@ -8,7 +8,8 @@
 최적화: Levenberg–Marquardt(numpy, 수치 야코비안), 여러 초기값. 교차 검증은 고유 자세 하나를 빼고 맞춘 뒤 예측.
 
 입력 JSON: {"camera_info": "경로", "poses": [{"id": "...", "unique": "고유키", "q": [J1,J2,J3,J4,J5], "u": 열, "v": 행}, ...]}
-사용: uv run python scripts/h3_fit.py <입력.json>  |  uv run python scripts/h3_fit.py --selftest
+사용: uv run python scripts/h3_fit.py <입력.json> [--exclude 고유키,고유키] [--models A,J,R,B]  |  --selftest
+--exclude: 사전 고정 절차상 검출 실패(눈 지정으로 처리한 자세)를 빼고 맞춘다. 횡방향 = 그 자세의 J1 미분이 가리키는 영상 방향.
 """
 import json
 import sys
@@ -121,6 +122,9 @@ def fit(qs, uv, K, D, model="A", seed=0):
     return best
 
 
+DETAILS = []
+
+
 def loo(qs, uv, uniq, K, D, model="A"):
     out = []
     for key in sorted(set(uniq)):
@@ -128,18 +132,30 @@ def loo(qs, uv, uniq, K, D, model="A"):
         test = [i for i, u in enumerate(uniq) if u == key]
         x, _, _ = fit([qs[i] for i in keep], uv[keep], K, D, model)
         pred = project(x[:9], [qs[i] for i in test], K, D, offsets(x, model))
-        out.append((key, float(np.linalg.norm(pred - uv[test], axis=1).mean())))
+        err = pred - uv[test]
+        out.append((key, float(np.linalg.norm(err, axis=1).mean())))
+        # 횡방향: 이 자세에서 J1을 ±0.5° 돌릴 때 영상 위치가 움직이는 방향(적합 모수 기준)
+        q = np.asarray(qs[test[0]], float)
+        lateral = []
+        for dq in (-0.5, 0.5):
+            qq = q.copy(); qq[0] += dq
+            lateral.append(project(x[:9], [qq], K, D, offsets(x, model))[0])
+        axis = lateral[1] - lateral[0]
+        axis = axis / np.linalg.norm(axis)
+        e = err.mean(0)
+        DETAILS.append((key, float(e @ axis), float(e @ np.array([-axis[1], axis[0]]))))
     return out
 
 
-def report(data, selftest=False):
+def report(data, exclude=(), models=("A", "J", "R", "B")):
     K, D = load_camera(data["camera_info"])
-    poses = data["poses"]
+    poses = [p for p in data["poses"] if p["unique"] not in exclude]
     qs = [p["q"] for p in poses]
     uv = np.array([[p["u"], p["v"]] for p in poses], float)
     uniq = [p["unique"] for p in poses]
     out = {"points": len(poses), "unique_poses": len(set(uniq))}
-    for model in ("A", "J", "R", "B"):
+    for model in models:
+        DETAILS.clear()
         x, cost, J = fit(qs, uv, K, D, model)
         fit_res = np.linalg.norm((project(x[:9], qs, K, D, offsets(x, model)) - uv), axis=1)
         sv = np.linalg.svd(J, compute_uv=False)
@@ -147,7 +163,10 @@ def report(data, selftest=False):
         errs = np.array([e for _, e in cv])
         out[model] = {"fit_rms_px": round(float(np.sqrt((fit_res ** 2).mean())), 3),
                       "loo_rms_px": round(float(np.sqrt((errs ** 2).mean())), 3), "loo_p95_px": round(float(np.percentile(errs, 95)), 3),
-                      "loo_per_pose": {k: round(e, 3) for k, e in cv}, "params": x.round(3).tolist(),
+                      "loo_per_pose": {k: round(e, 3) for k, e in cv},
+                      "loo_lateral_rms_px": round(float(np.sqrt(np.mean([d[1] ** 2 for d in DETAILS]))), 3),
+                      "loo_radial_rms_px": round(float(np.sqrt(np.mean([d[2] ** 2 for d in DETAILS]))), 3),
+                      "loo_lateral_radial_per_pose": {d[0]: [round(d[1], 2), round(d[2], 2)] for d in DETAILS}, "params": x.round(3).tolist(),
                       "jacobian_singular_values": sv.round(4).tolist(), "condition": float(sv[0] / max(sv[-1], 1e-12))}
     return out
 
@@ -178,4 +197,7 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--selftest"]:
         selftest()
     else:
-        print(json.dumps(report(json.loads(Path(sys.argv[1]).read_text())), ensure_ascii=False, indent=1))
+        args = sys.argv[2:]
+        exclude = tuple(args[args.index("--exclude") + 1].split(",")) if "--exclude" in args else ()
+        models = tuple(args[args.index("--models") + 1].split(",")) if "--models" in args else ("A", "J", "R", "B")
+        print(json.dumps(report(json.loads(Path(sys.argv[1]).read_text()), exclude, models), ensure_ascii=False, indent=1))
