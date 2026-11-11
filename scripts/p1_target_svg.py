@@ -25,7 +25,9 @@ def main() -> None:
     img = cv2.imread(photo)
     from learned_grasp.l1 import block_from_image  # noqa: F401 (보드 마커 중심은 아래서 직접 검출)
     from cv2 import aruco
-    det = aruco.ArucoDetector(aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11), aruco.DetectorParameters())
+    params = aruco.DetectorParameters()
+    params.errorCorrectionRate = 1.0
+    det = aruco.ArucoDetector(aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11), params)
     corners, ids, _ = det.detectMarkers(img[:, :, 2])
     board = next(c.reshape(4, 2).mean(0) for c, i in zip(corners, ids.ravel()) if int(i) == 1)
     cx, cy = board[0] + t["du"], board[1] + t["dv"]

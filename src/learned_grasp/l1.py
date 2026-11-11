@@ -96,7 +96,9 @@ def block_from_image(img: np.ndarray, board_ref=None) -> dict | None:
     import cv2
     from cv2 import aruco
 
-    det = aruco.ArucoDetector(aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11), aruco.DetectorParameters())
+    params = aruco.DetectorParameters()
+    params.errorCorrectionRate = 1.0  # 보드 마커 id 1은 기본 설정에서 조명에 따라 놓치는 사진이 있다(P1 p1-02 빈 보드 사진)
+    det = aruco.ArucoDetector(aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11), params)
     corners, ids, _ = det.detectMarkers(img[:, :, 2])
     board = None
     if ids is not None:
