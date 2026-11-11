@@ -926,6 +926,7 @@ def main() -> None:
             cells = json.loads(args.cells.read_text(encoding="utf-8"))["cells"]
             chain_ledger = AttemptLedger(folder / "chain.jsonl")
             if args.ack:
+                chain_ledger.close_interrupted()  # 끝나지 않은 시도(프로세스가 예외로 끝남)를 먼저 중단으로 닫아야 확인 대상이 된다
                 done, _ = chain_ledger.state()
                 if done.get(args.ack, {}).get("outcome") not in ("failed", "interrupted"):
                     raise SystemExit(f"--ack는 실패·중단한 시도에만 쓴다: {args.ack}")
