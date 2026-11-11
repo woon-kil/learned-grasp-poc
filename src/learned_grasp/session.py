@@ -530,7 +530,7 @@ def run_chain(
         raise SafetyViolation(f"중단·실패한 시도가 있어 사람 확인 전에는 진행하지 않는다(--ack): {stopped}")
     yaw = yaw or (YawModel() if align else None)
     confirmed_j5 = {"pick": False, "place": False}
-    conf = {"dev": None, "off_pick": False, "off_place": False}
+    conf = {"hi": None, "lo": None, "off_pick": False, "off_place": False}  # 방향(J5>90, J5<90)별로 확인한 최대 편차
     n_rows = len(table.entries)
     first = len(finished) + 1
     last_success = first > 1 and finished.get(f"chain-{first - 1:03d}", {}).get("outcome") == "success"
@@ -575,12 +575,19 @@ def run_chain(
         arm.goto(hover)
         ledger.start(trial, joints_grasp=arm.gate.joints(grasp), joints_hover=arm.gate.joints(hover), plan=planned.asdict(), place_at={"r_index": nxt["r_index"], "j1": nxt["j1"]}, placed_at=previous, same_cell=same_cell, pick_j5=pick_j5, place_j5=place_j5,
                      offset=delta_actual, r_l1=planned.r_index, r_pick=r_pick, place_row=place_row, human_placed=human_placed, clamped=planned.clamped if align else False)
-        need_j5 = align and pick_j5 != 90 and not confirmed_j5["pick"]
+        need_j5 = align and not escalate and pick_j5 != 90 and not confirmed_j5["pick"]  # escalate(R1·X1)는 방향별 상승 규칙만 쓴다
         dev_pick = abs(pick_j5 - 90)
-        need_esc = escalate and ((conf["dev"] is not None and dev_pick >= conf["dev"] + 10) or (abs(delta_actual) >= 3 and not conf["off_pick"]))
+        side_pick = "hi" if pick_j5 > 90 else "lo"
+
+        def side_need(side, dev):  # 그 방향에서 편차 15° 이상을 처음 쓰거나, 그 방향 이전 확인 최대보다 10° 이상 커질 때
+            mx = conf[side]
+            return (mx is None and dev >= 15) or (mx is not None and dev >= mx + 10)
+
+        need_esc = escalate and (side_need(side_pick, dev_pick) or (abs(delta_actual) >= 3 and not conf["off_pick"]))
         if confirm_each or k == first or need_j5 or need_esc:
             confirmed_j5["pick"] = confirmed_j5["pick"] or pick_j5 != 90
-            conf["dev"] = dev_pick if conf["dev"] is None else max(conf["dev"], dev_pick)
+            if dev_pick >= 15:
+                conf[side_pick] = dev_pick if conf[side_pick] is None else max(conf[side_pick], dev_pick)
             conf["off_pick"] = conf["off_pick"] or abs(delta_actual) >= 3
             try:
                 _wait_dabai_signal(signal, "descend", wait_s, sleep, clock, log)
@@ -621,11 +628,13 @@ def run_chain(
         target = (hover, grasp) if not success else (Pose(HOVER, place_row, nxt["j1"], place_j5), Pose(GRASP, place_row, nxt["j1"], place_j5))
         arm.goto(target[0])
         dev_place = abs(place_j5 - 90)
-        need_place = success and align and place_j5 != 90 and not confirmed_j5["place"]
-        need_place_esc = success and escalate and ((conf["dev"] is not None and dev_place >= conf["dev"] + 10) or (delta_actual != 0 and not conf["off_place"]))
+        side_place = "hi" if place_j5 > 90 else "lo"
+        need_place = success and align and not escalate and place_j5 != 90 and not confirmed_j5["place"]
+        need_place_esc = success and escalate and (side_need(side_place, dev_place) or (delta_actual != 0 and not conf["off_place"]))
         if success and (confirm_each or need_place or need_place_esc):  # 내려놓는 하강 확인(선택·처음 J5≠90·상승·처음 오프셋). 없으면 블록을 쥔 채 park로 돌아가 멈춘다
             confirmed_j5["place"] = confirmed_j5["place"] or place_j5 != 90
-            conf["dev"] = dev_place if conf["dev"] is None else max(conf["dev"], dev_place)
+            if dev_place >= 15:
+                conf[side_place] = dev_place if conf[side_place] is None else max(conf[side_place], dev_place)
             conf["off_place"] = conf["off_place"] or delta_actual != 0
             try:
                 _wait_dabai_signal(signal, "place", wait_s, sleep, clock, log)

@@ -22,7 +22,7 @@ def main() -> None:
     n_succ = sum(1 for t in ids if t in fin and fin[t]["success"])
     print(f"시도 {len(ids)}: 성공 {n_succ}, 실패 {sum(1 for t in fin.values() if t['outcome'] == 'failed')}, 중단 {sum(1 for t in fin.values() if t['outcome'] == 'interrupted')}")
     print("거절:", [(r["trial_id"], r["reason"][:40]) for r in recs if r.get("kind") == "rejected"], " 정지 요청:", [r["trial_id"] for r in recs if r.get("kind") == "stop_requested"])
-    ext = [t for i, t in enumerate(ids) if i % 2 == 1]  # 짝수 번호 시도(극단 집기)
+    ext = [t for i, t in enumerate(ids) if i % 2 == 1 and not st[t].get("human_placed")]  # 짝수 번호 시도(극단 집기). 사람이 다시 놓은 블록은 제외
     print(f"극단 집기(짝수 시도) 성공 {sum(1 for t in ext if fin.get(t, {}).get('success'))}/{len(ext)}")
     devs = np.array([abs(st[t]["pick_j5"] - 90) for t in ext]) if ext else np.array([])
     if len(devs):
@@ -51,7 +51,7 @@ def main() -> None:
             after_ext.append(resid)
     if clean:
         r = np.array([x[2] for x in clean])
-        print(f"깨끗한 극단 놓기(near-90 집기 뒤, n {len(r)}): 놓인 뒤 d 실측−예측 평균 {r.mean():+.1f}°, 표준편차 {r.std():.1f}°, |최대| {abs(r).max():.1f}° (판정 ≤ 5.0°)")
+        print(f"near-90 집기 뒤 극단 놓기(n {len(r)}): 놓인 뒤 d 실측−예측 평균 {r.mean():+.1f}°, 표준편차 {r.std():.1f}°, |최대| {abs(r).max():.1f}° (판정 ≤ 5.0°, 기준선 CH-3 정렬 놓기 3.4°. 3.4°를 넘는 만큼을 극단 모델 오차로 읽는다)")
         print("  (놓기 J5, 측정 d, 잔차):", [(a, round(b, 1), round(c, 1)) for a, b, c in clean])
     if after_ext:
         r = np.array(after_ext)

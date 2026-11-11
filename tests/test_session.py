@@ -1232,3 +1232,34 @@ def test_chain_marks_block_placed_by_human_after_rejection(ready_config, tmp_pat
     assert error is None
     start = [r for r in ledger.records() if r.get("event") == "start"][0]
     assert start["human_placed"] is True and start["placed_at"] is None
+
+
+def test_chain_escalation_confirms_each_side_of_j5_separately(ready_config, tmp_path):
+    from learned_grasp.g0_runner import Outcome
+    from learned_grasp.l1 import YawModel
+    from learned_grasp.session import run_chain
+
+    yaw = YawModel()
+    table = generate(ready_config.table)
+    rows = [e.r_mm for e in table.entries]
+    cells = [{"r_index": 5, "j1": 90}, {"r_index": 4, "j1": 80}, {"r_index": 5, "j1": 90}, {"r_index": 4, "j1": 80}]
+    schedule = [112, None, 64, None]
+    # 측정: 1번은 near-90 블록, 2번은 112로 놓인 블록, 3번은 정렬로 놓인 블록, 4번은 64로 놓인 블록(실제 위치·방향은 모델이 만든 값)
+    queue = iter([_aligned(85.0, rows[4], 4, 90), _aligned(90.0, rows[5], 5, 112), _aligned(80.0, rows[4], 4, yaw.place_j5(80, 4)), _aligned(90.0, rows[5], 5, 64)])
+    fake = _GripFake(148)
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    signal = tmp_path / "dabai_next"
+    arrivals = []
+
+    def log(line, **k):
+        if "arrived" in line:
+            arrivals.append(json.loads(line)["arrived"])
+
+    def sleep(_):
+        if not signal.exists():
+            signal.write_text("1")
+
+    run_chain(arm, _ChainCam(), lambda t: Outcome(True, "관찰기"), AttemptLedger(tmp_path / "chain.jsonl"), ready_config, table, cells, 4, signal, lambda path: next(queue),
+              hold_s=0.0, sleep=sleep, clock=lambda: 0.0, log=log, align=True, escalate=True, place_j5_schedule=schedule, j5_clamp_margin=4.0, rest_every=0)
+    # 첫 집기, 높은 쪽 첫 극단 놓기(112), 낮은 쪽 첫 극단 놓기(64). 같은 쪽 두 번째 극단 집기는 확인 없음
+    assert arrivals == ["descend", "place", "place"], arrivals

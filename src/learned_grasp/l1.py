@@ -219,9 +219,10 @@ def plan_aligned(measured: dict | None, table: PoseTable, l1: L1Map | None = Non
     else:
         return Plan(False, "J5 정렬이 수렴하지 않았다", r_index=r_index, j1=j1, **base)
     over = max(J5_RANGE[0] - wanted, wanted - J5_RANGE[1], 0.0)
-    if over > 0 and over <= j5_clamp_margin:
-        base["clamped"] = True  # 반복 중 j5는 이미 범위 끝으로 잘려 있다
-    elif not (J5_RANGE[0] <= int(round(wanted)) <= J5_RANGE[1]):
+    out_of_range = not (J5_RANGE[0] <= int(round(wanted)) <= J5_RANGE[1])
+    if out_of_range and over <= j5_clamp_margin:
+        base["clamped"] = True  # 반올림해도 범위 밖일 때만. 반복 중 j5는 이미 범위 끝으로 잘려 있다
+    elif out_of_range:
         return Plan(False, f"J5 보정 {wanted:.0f}이 범위 {J5_RANGE} 밖(d {d:+.1f}°). 사람이 블록 방향을 확인한다", r_index=r_index, j1=j1, **base)
     j1c, rc, res = l1.inverse(measured["du"], measured["dv"], (r_lo, r_hi), float(j5))
     base.update(j1_cont=j1c, r_cont=rc, residual_px=res, j5=j5)
