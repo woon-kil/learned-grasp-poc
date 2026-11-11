@@ -576,6 +576,27 @@ def run_chain(
     camera.snapshot(f"chain-{first + count:03d}")  # 마지막으로 놓은 블록의 방향도 잰다(쓰기 없음, 다음 시도의 입력 사진 이름)
 
 
+def release_here(arm: SafeArm, r_index: int, j1: int, j5: int) -> None:
+    """멈춘 자리(grasp 자세, 블록을 쥔 채)에서 정상 흐름의 나머지(열기 → hover → park)를 한다.
+
+    프로세스가 도착 확인 실패로 끝난 뒤 새 프로세스가 자세를 모를 때 쓴다. 조회가 이 자리의 관절값과 맞지 않으면 쓰기 전에 멈춘다.
+    조회값은 확인에만 쓰고 목표로 쓰지 않는다.
+    """
+    here = Pose(GRASP, r_index, j1, j5)
+    expected = arm.gate.joints(here)
+    reading = arm.read()
+    values = reading.get("values")
+    tolerance = arm.gate.config.motion.arrival_tol_deg
+    if not values or any(abs(v - e) > tolerance for v, e in zip(values[:5], expected)):
+        raise SafetyViolation(f"조회가 grasp 자세와 맞지 않아 움직이지 않는다. 기대 {expected}, 조회 {values}")
+    arm.pose = here
+    arm.grip = arm.gate.config.close_sdk
+    arm.holding = True
+    arm.set_grip("open")
+    arm.goto(Pose(HOVER, r_index, j1, j5))
+    arm.goto(PARK_POSE)
+
+
 GRIP_MAX_WAIT_S = 300.0  # H2-A 실측: 사람이 자를 대고 읽고 손을 빼 답하는 데 약 211초
 
 
@@ -776,7 +797,7 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", "chain", *G0D_COMMANDS, "answer"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", "chain", "release-here", *G0D_COMMANDS, "answer"])
     parser.add_argument("--spread", type=Path)
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--r-index", type=int)
@@ -791,6 +812,7 @@ def main() -> None:
     parser.add_argument("--rest-sec", type=float, default=300.0, help="chain: 쉬는 시간(초)")
     parser.add_argument("--ack", help="chain: 실패·중단한 시도 id를 사람이 확인했다고 기록하고 이어 간다(예: chain-012)")
     parser.add_argument("--align", action="store_true", help="chain: J5로 손을 블록 방향(집기)·반경선(놓기)에 맞춘다(config/l1_yaw.json)")
+    parser.add_argument("--j5", type=int, help="release-here: 멈춘 grasp 자세의 J5")
     parser.add_argument("--hover-only", action="store_true", help="dabai-view: hover에서 신호 뒤 grasp 없이 park로 돌아온다")
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
@@ -805,8 +827,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.hover_only and args.command != "dabai-view":
         raise SystemExit("--hover-only는 dabai-view에서만 쓴다")
-    if args.j1 is not None and args.command not in ("dabai-view", "p1-pick"):
-        raise SystemExit("--j1은 dabai-view와 p1-pick에서만 쓴다")
+    if args.j1 is not None and args.command not in ("dabai-view", "p1-pick", "release-here"):
+        raise SystemExit("--j1은 dabai-view, p1-pick, release-here에서만 쓴다")
     if args.command == "answer":
         # 실행 중인 세션 옆 터미널에서 쓴다. 잠금과 드라이버를 잡지 않는다.
         print(answer_once(args.session.parent))
@@ -835,19 +857,21 @@ def main() -> None:
         return
     if args.command == "p1-pick" and (args.r_index is None or args.j1 is None or args.trial is None):
         raise SystemExit("p1-pick은 --r-index, --j1, --trial이 필요하다")
+    if args.command == "release-here" and (args.r_index is None or args.j1 is None or args.j5 is None):
+        raise SystemExit("release-here는 --r-index, --j1, --j5가 필요하다")
     if args.command == "chain" and (args.cells is None or args.count is None or args.count < 1):
         raise SystemExit("chain은 --cells와 1 이상의 --count가 필요하다")
     if args.command == "grip-max":
         if args.z_offset != 15 or args.r_index is None:
             raise SystemExit("grip-max는 --z-offset 15와 --r-index가 필요하다")
     if args.r_index is not None:
-        if args.command not in ("close-check", "dabai-view", "grip-max", "p1-pick"):
-            raise SystemExit("--r-index는 close-check, dabai-view, grip-max, p1-pick에서만 쓴다")
+        if args.command not in ("close-check", "dabai-view", "grip-max", "p1-pick", "release-here"):
+            raise SystemExit("--r-index는 close-check, dabai-view, grip-max, p1-pick, release-here에서만 쓴다")
         if args.command in ("close-check", "grip-max"):
             require_site_folder(folder, args.r_index)
     if args.command == "carry-test" and args.attempt is None:
         raise SystemExit("--attempt가 필요하다")
-    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", "chain", *G0D_COMMANDS) and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", "chain", "release-here", *G0D_COMMANDS) and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command in ("ladder", "close-check", "grip-max"):
         require_previous_observation(folder, args.z_offset)
@@ -886,6 +910,8 @@ def main() -> None:
                        {"trial_id": args.trial, "r_index": args.r_index, "j1": args.j1, "j5": 90}, folder / "dabai_next", min(args.hold_sec or 5.0, 60.0))
             finally:
                 camera.close()
+        elif args.command == "release-here":
+            release_here(arm, args.r_index, args.j1, args.j5)
         elif args.command == "chain":
             import cv2
 

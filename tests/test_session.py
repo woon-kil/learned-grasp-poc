@@ -742,7 +742,7 @@ def test_dabai_view_cli_rejects_j1_on_other_commands(monkeypatch, tmp_path):
     monkeypatch.setattr("sys.argv", ["session", "read", "--session", str(tmp_path / "approval.json"), "--j1", "70"])
     with pytest.raises(SystemExit) as info:
         session.main()
-    assert "--j1은 dabai-view와 p1-pick에서만" in str(info.value)
+    assert "--j1은 dabai-view, p1-pick, release-here에서만" in str(info.value)
 
 
 # --- p1-pick: 사람이 놓은 블록을 L1이 정한 자세에서 집는 시도 ----------------------------------------
@@ -1075,3 +1075,31 @@ def test_chain_align_rejects_block_that_needs_j5_outside_range(ready_config, tmp
     m["block_angle_deg"] = (m["block_angle_deg"] + 50.0) % 180.0
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [m], [{"r_index": 6, "j1": 100}], 1, align=True)
     assert isinstance(error, NeedHuman) and "J5 보정" in str(error) and fake.writes == []
+
+
+def test_release_here_opens_at_grasp_then_hover_and_park(ready_config):
+    from learned_grasp.session import release_here
+
+    table = generate(ready_config.table)
+    gate = SafetyGate(ready_config, table)
+    fake = FakeArm()
+    fake.write6(gate.joints(Pose(GRASP, 1, 76, 93)), ready_config.close_sdk, 100)  # 블록을 쥔 채 멈춘 상태
+    arm = SafeArm(fake, gate, sleep=lambda _: None)
+    release_here(arm, 1, 76, 93)
+    after = fake.writes[1:]
+    assert [w[1] for w in after] == [ready_config.open_sdk, ready_config.open_sdk, ready_config.open_sdk]  # 열고, 열린 채 hover, park
+    assert tuple(after[1][0]) == tuple(gate.joints(Pose(HOVER, 1, 76, 93))) and tuple(after[2][0]) == tuple(gate.joints(PARK_POSE))
+    assert arm.pose == PARK_POSE and not arm.holding
+
+
+def test_release_here_refuses_when_reading_does_not_match(ready_config):
+    from learned_grasp.session import release_here
+
+    table = generate(ready_config.table)
+    gate = SafetyGate(ready_config, table)
+    fake = FakeArm()
+    fake.write6(gate.joints(Pose(GRASP, 3, 90, 90)), ready_config.close_sdk, 100)  # 다른 자리에 서 있다
+    arm = SafeArm(fake, gate, sleep=lambda _: None)
+    with pytest.raises(SafetyViolation, match="맞지 않아"):
+        release_here(arm, 1, 76, 93)
+    assert len(fake.writes) == 1
