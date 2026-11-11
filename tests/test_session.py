@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -9,7 +10,7 @@ from learned_grasp.arm import FakeArm, SafeArm
 from learned_grasp.attempts import AttemptLedger
 from learned_grasp.kinematics import fk_batch
 from learned_grasp.pose_table import generate
-from learned_grasp.safety import HOVER, PARK_POSE, Pose, SafetyGate, SafetyViolation
+from learned_grasp.safety import GRASP, HOVER, PARK_POSE, Pose, SafetyGate, SafetyViolation
 from learned_grasp.session import (
     LADDER_OFFSETS_MM,
     CountingDriver,
@@ -830,3 +831,132 @@ def test_p1_refuses_repeated_trial_id(ready_config, tmp_path):
     _p1_run(ready_config, tmp_path)
     with pytest.raises(SafetyViolation):
         _p1_run(ready_config, tmp_path)
+
+
+# --- chain: L1이 고른 자리에서 집고 목록의 다음 자리에 내려놓는 연쇄 시험 ---------------------------------
+
+
+class _ChainCam(_Cam):
+    def fetch(self, name):
+        return Path(name)
+
+
+def _measured(j1c, r_mm, psi_offset=0.0):
+    from learned_grasp.l1 import L1Map
+
+    l1 = L1Map()
+    du, dv = l1.forward(j1c, r_mm)
+    return {"du": float(du), "dv": float(dv), "block_angle_deg": float(l1.radial_angle_deg(j1c, r_mm) % 180.0 + psi_offset), "area": 2300, "board": [691.0, 291.0]}
+
+
+def _chain_run(ready_config, tmp_path, measures, cells, count, grip_after=148, observer_success=True, signal_ok=True, ledger=None, signals=None):
+    from learned_grasp.g0_runner import Outcome
+    from learned_grasp.session import run_chain
+
+    table = generate(ready_config.table)
+    fake = _GripFake(grip_after)
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    signal = tmp_path / "dabai_next"
+    ledger = ledger or AttemptLedger(tmp_path / "chain.jsonl")
+    cam = _ChainCam()
+    queue = iter(measures)
+    given = [0]
+
+    def sleep(_):
+        if signal_ok and not signal.exists() and (signals is None or given[0] < signals):
+            signal.write_text("1")
+            given[0] += 1
+
+    # 신호를 주지 않는 대기는 시계가 마감을 넘기게 한다: 대기 시작(clock 호출 1회) 뒤 첫 확인에서 400초
+    clock_calls = [0]
+
+    def clock():
+        if signal_ok and (signals is None or given[0] < signals):
+            return 0.0
+        clock_calls[0] += 1
+        return 0.0 if clock_calls[0] % 2 == 1 else 400.0
+
+    kwargs = dict(sleep=sleep, clock=clock, log=lambda line, **k: None)
+    observer = lambda trial: Outcome(observer_success, "관찰기")
+    error = None
+    try:
+        run_chain(arm, cam, observer, ledger, ready_config, table, cells, count, signal, lambda path: next(queue), hold_s=0.0, **kwargs)
+    except (NeedHuman, SafetyViolation) as exc:
+        error = exc
+    return arm, fake, ledger, cam, error, table
+
+
+def test_chain_picks_at_l1_cell_and_places_at_next_cell(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0), _measured(99.8, 150.0)], cells, 2)
+    assert error is None and cam.snaps == ["chain-001", "chain-002"]
+    finished, _ = ledger.state()
+    assert [finished[t]["outcome"] for t in ("chain-001", "chain-002")] == ["success", "success"]
+    starts = [r for r in ledger.records() if r.get("event") == "start"]
+    assert starts[0]["plan"]["j1"] == 85 and starts[0]["place_at"] == {"r_index": 6, "j1": 100}
+    gate = arm.gate
+    assert tuple(fake.writes[-1][0]) == tuple(gate.joints(PARK_POSE))  # 마지막에 park
+    place_hover = tuple(gate.joints(Pose(HOVER, 6, 100, 90)))
+    assert place_hover in [tuple(w[0]) for w in fake.writes]  # 목록의 자리로 갔다
+    assert arm.pose == PARK_POSE and not arm.holding
+
+
+def test_chain_stops_without_moving_when_l1_rejects(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}]
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0, psi_offset=12.0)], cells, 1)
+    assert isinstance(error, NeedHuman) and "L1이 시도하지 않는다" in str(error)
+    assert fake.writes == []
+    assert any(r.get("event") == "note" and r.get("kind") == "rejected" for r in ledger.records())
+
+
+def test_chain_failure_puts_block_back_at_same_cell_and_stops(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 2, grip_after=P1_GRIP_READ_MAX + 3)
+    assert isinstance(error, NeedHuman) and "실패" in str(error)
+    finished, _ = ledger.state()
+    assert finished["chain-001"]["outcome"] == "failed"
+    assert tuple(arm.gate.joints(Pose(HOVER, 6, 100, 90))) not in [tuple(w[0]) for w in fake.writes]  # 다음 자리로 가지 않았다
+    assert arm.pose == PARK_POSE
+    # 실패한 기록이 있으면 다시 이어 가지 않는다
+    _, _, _, _, again, _ = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 1, ledger=ledger)
+    assert isinstance(again, SafetyViolation)
+
+
+def test_chain_does_not_descend_without_confirmation(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}]
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 1, signal_ok=False)
+    assert isinstance(error, NeedHuman)
+    finished, _ = ledger.state()
+    assert finished["chain-001"]["outcome"] == "interrupted"
+    assert all(tuple(w[0]) != tuple(arm.gate.joints(Pose(GRASP, 4, 85, 90))) for w in fake.writes)
+    assert arm.pose == PARK_POSE
+
+
+def test_chain_refuses_when_cells_run_out(ready_config, tmp_path):
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [], [{"r_index": 6, "j1": 100}], 2)
+    assert isinstance(error, SafetyViolation) and fake.writes == []
+
+
+def test_chain_place_descent_needs_confirmation_too(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}]
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 1, signals=1)
+    assert isinstance(error, NeedHuman) and "내려놓기 전 확인" in str(error)
+    finished, _ = ledger.state()
+    assert finished["chain-001"]["outcome"] == "interrupted" and finished["chain-001"]["picked"] is True
+    writes = [tuple(w[0]) for w in fake.writes]
+    assert tuple(arm.gate.joints(Pose(GRASP, 6, 100, 90))) not in writes  # 내려놓는 하강을 하지 않았다
+    assert tuple(arm.gate.joints(Pose(HOVER, 6, 100, 90))) in writes and arm.pose == PARK_POSE and arm.holding
+
+
+def test_chain_keeps_rejected_photo_and_records_same_cell(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0, psi_offset=12.0)], cells, 1)
+    assert isinstance(error, NeedHuman) and cam.snaps == ["chain-001"]
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 1, ledger=ledger)
+    assert error is None and cam.snaps == ["chain-001-r1"]  # 거절된 사진 이름을 다시 쓰지 않는다
+    start = [r for r in ledger.records() if r.get("event") == "start"][0]
+    assert start["before_frame"] == "chain-001-r1" and start["same_cell"] is False
+    # 두 번째 시도는 직전에 내려놓은 자리(6, 100)를 L1이 다시 고르면 같은 자리로 기록한다
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(100.0, 149.6)], cells, 1, ledger=ledger)
+    second = [r for r in ledger.records() if r.get("event") == "start"][1]
+    assert second["placed_at"] == {"r_index": 6, "j1": 100} and second["same_cell"] is True, second

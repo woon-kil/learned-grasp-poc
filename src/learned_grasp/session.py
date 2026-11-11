@@ -12,6 +12,7 @@
   python -m learned_grasp.session answer  --session runs/G0d-0/approval.json   (다른 터미널, 실행 중 질문에 답한다)
   python -m learned_grasp.session dabai-view --session runs/DB-1/approval.json --start-confirmed [--r-index N] [--j1 J] [--hover-only]   (도착 줄마다 촬영 뒤 `touch runs/DB-1/dabai_next`)
   python -m learned_grasp.session p1-pick --session runs/P1/approval.json --r-index R --j1 J --trial p1-NN --start-confirmed   (hover에서 멈춤, 하강 확인 뒤 `touch runs/P1/dabai_next`)
+  python -m learned_grasp.session chain --session runs/CH/approval.json --cells config/chain_cells.json --count N --board-ref X,Y --start-confirmed   (매 하강 전 hover에서 멈춤, 확인 뒤 `touch runs/CH/dabai_next`)
   python -m learned_grasp.session grip-max --session runs/H2-C-r4/approval.json --z-offset 15 --r-index 4 --max-sdk 180 --start-confirmed   (단계마다 읽은 뒤 `touch runs/H2-C-r4/dabai_next`, 중지는 `touch runs/H2-C-r4/grip_stop`)
 
 대화형 입력이 없다. 감독자는 전원 차단으로 멈춘다. --start-confirmed는 사용자가 빈 그리퍼, 시작 자세,
@@ -33,6 +34,7 @@ from learned_grasp.attempts import AttemptLedger
 from learned_grasp.camera import P620Camera
 from learned_grasp.config import Config, load_config
 from learned_grasp.g0_runner import Outcome, compute_tolerance, dryrun_sheet, run_dryrun, run_replay, tolerance_variants
+from learned_grasp.l1 import block_from_image, plan
 from learned_grasp.pose_table import PoseTable, generate
 from learned_grasp.safety import GRASP, GRIP_SWEEP_MAX_SDK, GRIP_SWEEP_STEP, HOVER, PARK_POSE, Pose, SafetyGate, SafetyViolation
 
@@ -451,6 +453,97 @@ def run_p1(
     ledger.finish(trial["trial_id"], outcome="success" if success else "failed", success=success, reason=reason, read_at_park=read_at_park, grip_read=grip)
 
 
+def run_chain(
+    arm: SafeArm,
+    camera,
+    observer,
+    ledger: AttemptLedger,
+    config: Config,
+    table: PoseTable,
+    cells: list[dict],
+    count: int,
+    signal: Path,
+    measure,
+    hold_s: float = 5.0,
+    wait_s: float = 300.0,
+    sleep=None,
+    clock=None,
+    log=print,
+) -> None:
+    """연쇄 종단 시험. park 사진 → L1이 고른 자리에서 집기 → park → 목록의 다음 자리에 내려놓기를 count번 이어 간다.
+
+    사람은 시작 때 블록을 놓고 매 하강 전 확인 신호(signal)를 보낸다. 다음 시도의 입력 사진은 직전 내려놓기 뒤의 park 사진이다.
+    성공 = P1과 같다(관찰기 그리고 서보 6 판독). L1이 거절(검출 실패, 구역·방향 밖)하거나 시도가 실패하거나 확인 신호가 없으면
+    쓰기 없이(실패면 P1처럼 같은 자리에 도로 놓고) 멈춘다. 자동 복구 이동은 없다. cells[k-1]이 k번째 시도의 내려놓을 자리다.
+    """
+    import time as _time
+
+    sleep = sleep or _time.sleep
+    clock = clock or _time.monotonic
+    ledger.bind(config_version=config.config_version, table_sha256=table.sha256())
+    ledger.close_interrupted()
+    finished, _ = ledger.state()
+    stopped = sorted(trial_id for trial_id, record in finished.items() if record.get("outcome") in ("interrupted", "failed"))
+    if stopped:
+        raise SafetyViolation(f"중단·실패한 시도가 있어 더 진행하지 않는다: {stopped}")
+    first = len(finished) + 1
+    if first - 1 + count > len(cells):
+        raise SafetyViolation(f"자리 목록({len(cells)}개)이 모자란다: 이미 {first - 1}개, 요청 {count}개")
+    for k in range(first, first + count):
+        tid = f"chain-{k:03d}"
+        nxt = cells[k - 1]
+        rejected_before = sum(1 for r in ledger.records() if r.get("event") == "note" and r.get("kind") == "rejected" and r.get("trial_id") == tid)
+        frame = tid if rejected_before == 0 else f"{tid}-r{rejected_before}"  # 거절된 사진을 덮어쓰지 않는다
+        camera.snapshot(frame)  # 블록이 보드에 있고 팔은 park일 때의 사진
+        planned = plan(measure(camera.fetch(frame)), table)
+        if not planned.accept:
+            ledger.note("rejected", trial_id=tid, **planned.asdict())
+            raise NeedHuman(f"{tid}: L1이 시도하지 않는다({planned.reason}). 사람이 블록을 확인한다")
+        trial = {"trial_id": tid, "r_index": planned.r_index, "j1": planned.j1, "j5": 90, "before_frame": frame}
+        previous = cells[k - 2] if k > 1 else None  # 직전 시도가 이 블록을 내려놓은 자리
+        same_cell = previous is not None and (previous["r_index"], previous["j1"]) == (planned.r_index, planned.j1)
+        hover = Pose(HOVER, planned.r_index, planned.j1, 90)
+        grasp = Pose(GRASP, planned.r_index, planned.j1, 90)
+        if arm.pose != PARK_POSE:
+            arm.goto(PARK_POSE)
+        arm.goto(hover)
+        ledger.start(trial, joints_grasp=arm.gate.joints(grasp), joints_hover=arm.gate.joints(hover), plan=planned.asdict(), place_at={"r_index": nxt["r_index"], "j1": nxt["j1"]}, placed_at=previous, same_cell=same_cell)
+        try:
+            _wait_dabai_signal(signal, "descend", wait_s, sleep, clock, log)
+        except NeedHuman:
+            arm.goto(PARK_POSE)
+            ledger.finish(tid, outcome="interrupted", success=False, reason="하강 전 확인을 받지 못했다")
+            raise
+        arm.goto(grasp)
+        arm.set_grip("close")
+        arm.goto(hover)
+        arm.goto(PARK_POSE)
+        arm.sleep(hold_s)
+        read_at_park = arm.read()
+        outcome = observer(trial)
+        values = read_at_park.get("values")
+        grip = values[5] if values and len(values) > 5 else None
+        holds = grip is not None and grip <= P1_GRIP_READ_MAX
+        success = bool(outcome.success and holds)
+        reason = f"{outcome.reason}, 서보 6 판독 {grip}" + ("" if holds else f" > {P1_GRIP_READ_MAX}(빈 손으로 봄)")
+        target = (hover, grasp) if not success else (Pose(HOVER, nxt["r_index"], nxt["j1"], 90), Pose(GRASP, nxt["r_index"], nxt["j1"], 90))
+        arm.goto(target[0])
+        if success:  # 블록을 쥔 채 내려놓는 하강도 사용자 확인을 받는다. 없으면 블록을 쥔 채 park로 돌아가 멈춘다
+            try:
+                _wait_dabai_signal(signal, "place", wait_s, sleep, clock, log)
+            except NeedHuman as exc:
+                arm.goto(PARK_POSE)
+                ledger.finish(tid, outcome="interrupted", success=False, picked=True, reason=f"{reason}. 내려놓기 전 확인을 받지 못했다(블록을 쥐고 park)", read_at_park=read_at_park, grip_read=grip)
+                raise NeedHuman(f"{tid}: 내려놓기 전 확인을 받지 못했다. 블록을 쥔 채 park에 있다. 사람이 확인한다") from exc
+        arm.goto(target[1])
+        arm.set_grip("open")
+        arm.goto(target[0])
+        arm.goto(PARK_POSE)
+        ledger.finish(tid, outcome="success" if success else "failed", success=success, reason=reason, read_at_park=read_at_park, grip_read=grip)
+        if not success:
+            raise NeedHuman(f"{tid} 실패({reason}). 같은 자리에 도로 놓고 멈춘다. 사람이 확인한다")
+
+
 GRIP_MAX_WAIT_S = 300.0  # H2-A 실측: 사람이 자를 대고 읽고 손을 빼 답하는 데 약 211초
 
 
@@ -651,13 +744,16 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", *G0D_COMMANDS, "answer"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", "chain", *G0D_COMMANDS, "answer"])
     parser.add_argument("--spread", type=Path)
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--r-index", type=int)
     parser.add_argument("--max-sdk", type=int, default=GRIP_SWEEP_MAX_SDK, help="grip-max: 올릴 최대 SDK(close_sdk 초과, 180 이하)")
     parser.add_argument("--j1", type=int, help="dabai-view·p1-pick: hover·grasp의 J1(dabai-view 기본 90, 범위는 구성 j1_range)")
     parser.add_argument("--trial", help="p1-pick: 시도 id(예: p1-03)")
+    parser.add_argument("--cells", type=Path, help="chain: 내려놓을 자리 목록 JSON(scripts/chain_cells.py)")
+    parser.add_argument("--count", type=int, help="chain: 이번 실행의 시도 수")
+    parser.add_argument("--board-ref", help="chain: 보드 마커 id 1이 안 보일 때 쓸 중심 'x,y'(최근 빈 보드 사진)")
     parser.add_argument("--hover-only", action="store_true", help="dabai-view: hover에서 신호 뒤 grasp 없이 park로 돌아온다")
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
@@ -702,6 +798,8 @@ def main() -> None:
         return
     if args.command == "p1-pick" and (args.r_index is None or args.j1 is None or args.trial is None):
         raise SystemExit("p1-pick은 --r-index, --j1, --trial이 필요하다")
+    if args.command == "chain" and (args.cells is None or args.count is None or args.count < 1):
+        raise SystemExit("chain은 --cells와 1 이상의 --count가 필요하다")
     if args.command == "grip-max":
         if args.z_offset != 15 or args.r_index is None:
             raise SystemExit("grip-max는 --z-offset 15와 --r-index가 필요하다")
@@ -712,7 +810,7 @@ def main() -> None:
             require_site_folder(folder, args.r_index)
     if args.command == "carry-test" and args.attempt is None:
         raise SystemExit("--attempt가 필요하다")
-    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", *G0D_COMMANDS) and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", "chain", *G0D_COMMANDS) and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command in ("ladder", "close-check", "grip-max"):
         require_previous_observation(folder, args.z_offset)
@@ -749,6 +847,24 @@ def main() -> None:
             try:
                 run_p1(arm, camera, make_pick_observer(camera), AttemptLedger(folder / "p1.jsonl"), config, table,
                        {"trial_id": args.trial, "r_index": args.r_index, "j1": args.j1, "j5": 90}, folder / "dabai_next", min(args.hold_sec or 5.0, 60.0))
+            finally:
+                camera.close()
+        elif args.command == "chain":
+            import cv2
+
+            board_ref = tuple(float(v) for v in args.board_ref.split(",")) if args.board_ref else None
+
+            def measure(path):
+                image = cv2.imread(str(path))
+                if image is None:
+                    raise FileNotFoundError(f"사진을 읽지 못했다: {path}")
+                return block_from_image(image, board_ref)
+
+            cells = json.loads(args.cells.read_text(encoding="utf-8"))["cells"]
+            camera = P620Camera(f"runs/{approval.session_id}/frames")
+            try:
+                run_chain(arm, camera, make_pick_observer(camera), AttemptLedger(folder / "chain.jsonl"), config, table, cells, args.count,
+                          folder / "dabai_next", measure, min(args.hold_sec or 5.0, 60.0))
             finally:
                 camera.close()
         elif args.command == "grip-max":
