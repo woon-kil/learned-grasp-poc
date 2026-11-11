@@ -504,6 +504,8 @@ def run_chain(
     j5_clamp_margin: float = 0.0,
     j1_offsets: list[int] | None = None,
     confirm_j1_abs_ge: int | None = None,
+    hover_photo: bool = False,
+    human_replaced: bool = False,
 ) -> None:
     """연쇄 종단 시험. park 사진 → L1이 고른 자리에서 집기 → park → 목록의 다음 자리에 내려놓기를 count번 이어 간다.
 
@@ -512,6 +514,7 @@ def run_chain(
     offsets(R1 반경 허용 측정)면 k번째 시도는 L1 행에서 offsets[k-1]행 옮겨 집고(실제 행은 0~9로 자른다), 블록이 공칭 자리 근처에 놓이도록 놓는 손 행을 공칭 행 + 실제 오프셋으로 한다. J5는 실제 행으로 다시 계산한다.
     place_j5_schedule(X1)이 있으면 k번째 시도의 놓기 J5를 그 값으로 한다(None이면 정렬 J5). j5_clamp_margin은 plan_aligned에 넘겨 범위 끝 이내로 벗어난 J5를 자른다. 중간 거절 뒤 사람이 다시 놓은 시도는 human_placed로 기록한다.
     j1_offsets(X2 횡방향 허용 측정)가 있으면 k번째 시도는 L1이 정한 J1에서 j1_offsets[k-1]° 옮겨 집는다(손만 횡방향 이동). J1이 바뀌면 팔 전체가 돌아 손의 세계 각도가 바뀌므로 d를 집는 자리의 반경선 기준으로 다시 계산해 J5를 정한다. 놓는 손 J1은 공칭(닫을 때 블록이 두 손가락 가운데로 밀리므로). confirm_j1_abs_ge 이상인 오프셋 집기는 매번 확인한다.
+    hover_photo면 집기 hover에서 하강 전에 쓰기 없는 사진 한 장(`<id>-hover`)을 찍는다(손끝 축·좌우 간격을 사진에서 직접 재기 위함, X3). human_replaced는 L1 거절 뒤 사람이 블록을 실제로 다시 놓았을 때만 켠다(사진만 다시 찍은 경우 데이터를 버리지 않는다).
     escalate면 |J5−90|이 이전 확인 최대보다 10° 이상 커질 때, 처음 오프셋 3 집기·처음 오프셋 놓기에도 확인을 받는다. continue_on_miss(R1 전용)면 빈 손(서보 > 기준)으로 실패한 시도 뒤에도 이어 간다(다음 사진·L1이 받아들이지 않으면 멈춘다).
     성공 = P1과 같다(관찰기 그리고 서보 6 판독). L1이 거절(검출 실패, 구역·방향 밖)하거나 시도가 실패하거나 확인 신호가 없으면
     쓰기 없이(실패면 P1처럼 같은 자리에 도로 놓고) 멈춘다. 자동 복구 이동은 없다. cells[k-1]이 k번째 시도의 내려놓을 자리다.
@@ -593,7 +596,7 @@ def run_chain(
         if align and place_j5_schedule and place_j5_schedule[k - 1] is not None:
             place_j5 = int(place_j5_schedule[k - 1])
         trial = {"trial_id": tid, "r_index": r_pick, "j1": j1_pick, "j5": pick_j5, "before_frame": frame}
-        human_placed = rejected_before > 0  # L1 거절 뒤 사람이 다시 놓은 블록은 팔이 만든 방향이 아니다
+        human_placed = human_replaced and rejected_before > 0  # L1 거절 뒤 사람이 실제로 다시 놓은 블록만(--replaced)
         previous = cells[k - 2] if k > 1 and last_success and not human_placed else None  # 직전 시도가 이 블록을 내려놓은 자리(성공일 때만 알 수 있다)
         same_cell = previous is not None and (previous["r_index"], previous["j1"]) == (planned.r_index, planned.j1)  # L1이 고른 자리 기준(오프셋 전)
         hover = Pose(HOVER, r_pick, j1_pick, pick_j5)
@@ -601,6 +604,8 @@ def run_chain(
         if arm.pose != PARK_POSE:
             arm.goto(PARK_POSE)
         arm.goto(hover)
+        if hover_photo:
+            camera.snapshot(f"{tid}-hover")  # 하강 전 hover 사진(쓰기 없음)
         ledger.start(trial, joints_grasp=arm.gate.joints(grasp), joints_hover=arm.gate.joints(hover), plan=planned.asdict(), place_at={"r_index": nxt["r_index"], "j1": nxt["j1"]}, placed_at=previous, same_cell=same_cell, pick_j5=pick_j5, place_j5=place_j5,
                      offset=delta_actual, r_l1=planned.r_index, r_pick=r_pick, place_row=place_row, human_placed=human_placed, clamped=planned.clamped if align else False,
                      j1_offset=d1, j1_l1=planned.j1, lateral_mm=round(d1 * table.entries[r_pick].r_mm * math.pi / 180.0, 2),
@@ -933,6 +938,8 @@ def main() -> None:
     parser.add_argument("--r1", type=Path, help="chain: R1 일정 JSON(scripts/r1_cells.py: cells, offsets). 오프셋·확인 상승·빈 손 실패 이어 가기를 함께 켠다")
     parser.add_argument("--x1", type=Path, help="chain: X1 일정 JSON(scripts/x1_schedule.py: cells, place_j5). J5 극단 놓기·확인 상승·범위 끝 4° 자르기를 켠다")
     parser.add_argument("--x2", type=Path, help="chain: X2 일정 JSON(scripts/x2_schedule.py: cells, j1_offsets, confirm_abs_ge). 횡방향 J1 오프셋, 빈 손 실패 이어 가기를 켠다")
+    parser.add_argument("--hover-photo", action="store_true", help="chain: 집기 hover에서 하강 전 사진을 찍는다(손끝 축·좌우 간격 측정)")
+    parser.add_argument("--replaced", action="store_true", help="chain: 직전 L1 거절 뒤 사람이 블록을 실제로 다시 놓았다(human_placed 표시)")
     parser.add_argument("--align", action="store_true", help="chain: J5로 손을 블록 방향(집기)·반경선(놓기)에 맞춘다(config/l1_yaw.json)")
     parser.add_argument("--j5", type=int, help="release-here: 멈춘 grasp 자세의 J5. p1-pick: 이 시도의 J5(P2: 있으면 J5 확인 상승·비틀림 사진 모드)")
     parser.add_argument("--hover-only", action="store_true", help="dabai-view: hover에서 신호 뒤 grasp 없이 park로 돌아온다")
@@ -1066,7 +1073,8 @@ def main() -> None:
                           confirm_each=args.confirm_each, rest_every=args.rest_every, rest_s=args.rest_sec, stop=folder / "chain_stop", align=args.align or args.r1 is not None or args.x1 is not None or args.x2 is not None,
                           offsets=offsets, escalate=args.r1 is not None or args.x1 is not None or args.x2 is not None, continue_on_miss=args.r1 is not None or args.x2 is not None,
                           place_j5_schedule=place_schedule, j5_clamp_margin=4.0 if args.x1 else 0.0,
-                          j1_offsets=j1_offsets, confirm_j1_abs_ge=schedule.get("confirm_abs_ge") if args.x2 else None)
+                          j1_offsets=j1_offsets, confirm_j1_abs_ge=schedule.get("confirm_abs_ge") if args.x2 else None,
+                          hover_photo=args.hover_photo, human_replaced=args.replaced)
             finally:
                 camera.close()
         elif args.command == "grip-max":

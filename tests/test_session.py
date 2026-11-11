@@ -1231,6 +1231,12 @@ def test_chain_marks_block_placed_by_human_after_rejection(ready_config, tmp_pat
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_aligned(85.0, table.entries[4].r_mm, 4, 90)], cells, 1, ledger=ledger, align=True)
     assert error is None
     start = [r for r in ledger.records() if r.get("event") == "start"][0]
+    assert start["human_placed"] is False  # 사진만 다시 찍은 경우(--replaced 없음)는 데이터를 버리지 않는다
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path / "again", [bad], cells, 1, align=True)
+    assert isinstance(error, NeedHuman)
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path / "again", [_aligned(85.0, table.entries[4].r_mm, 4, 90)], cells, 1, ledger=ledger, align=True, human_replaced=True)
+    assert error is None
+    start = [r for r in ledger.records() if r.get("event") == "start"][0]
     assert start["human_placed"] is True and start["placed_at"] is None
 
 
@@ -1386,3 +1392,10 @@ def test_chain_shape_gate_accepts_natural_area_variation(ready_config, tmp_path)
     large = dict(_aligned(100.0, rows[6], 6, 90), area=2986, aspect=1.75)  # X2-1 둘째: 같은 블록의 자연 변동(비 1.58)
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [small, large], cells, 2, signals=9, align=True)
     assert error is None, error
+
+
+def test_chain_hover_photo_is_taken_before_descent(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}]
+    table = generate(ready_config.table)
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_aligned(85.0, table.entries[4].r_mm, 4, 90)], cells, 1, align=True, hover_photo=True)
+    assert error is None and "chain-001-hover" in cam.snaps and cam.snaps.index("chain-001-hover") > cam.snaps.index("chain-001")
