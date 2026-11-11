@@ -1178,3 +1178,28 @@ def test_p1_j5_confirmation_escalates_by_ten_degrees_and_takes_twist_photo(ready
         assert any(w[0][4] == j5 for w in fake.writes)  # J5가 실제 쓰기 5번째 축으로 나간다
     # 첫 시도(편차 5) 확인, 편차 0과 10(15 미만 증가)은 확인 없음, 편차 20(≥ 5+10)에서 다시 확인, 편차 10은 없음
     assert results == {"p2-01": True, "p2-02": False, "p2-03": False, "p2-04": True, "p2-05": False}
+
+
+def _writes_after_close(fake, ready_config):
+    """닫기(그리퍼 close_sdk) 쓰기 뒤의 쓰기들."""
+    idx = max(i for i, w in enumerate(fake.writes) if w[1] == ready_config.close_sdk)
+    return fake.writes[idx + 1:]
+
+
+def test_empty_hand_failure_never_redescends_to_grasp_in_chain(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}]
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 1, grip_after=P1_GRIP_READ_MAX + 3, continue_on_miss=True)
+    assert error is None
+    gate = arm.gate
+    after = [tuple(w[0]) for w in _writes_after_close(fake, ready_config)]
+    pick_grasp = tuple(gate.joints(Pose(GRASP, 4, 85, 90)))
+    assert after and pick_grasp not in after  # 닫은 뒤에는 grasp 높이로 다시 내려가지 않았다
+    assert tuple(gate.joints(PARK_POSE)) == after[-1] and fake.writes[-1][1] == ready_config.open_sdk  # hover에서 열고 park
+
+
+def test_empty_hand_failure_never_redescends_to_grasp_in_p1(ready_config, tmp_path):
+    arm, fake, ledger, cam, error = _p1_run(ready_config, tmp_path, grip_after=P1_GRIP_READ_MAX + 3)
+    table = generate(ready_config.table)
+    gate = SafetyGate(ready_config, table)
+    after = [tuple(w[0]) for w in _writes_after_close(fake, ready_config)]
+    assert tuple(gate.joints(Pose(GRASP, 4, 80, 90))) not in after

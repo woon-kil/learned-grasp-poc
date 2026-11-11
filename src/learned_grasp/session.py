@@ -457,11 +457,16 @@ def run_p1(
     holds = grip is not None and grip <= P1_GRIP_READ_MAX
     success = bool(outcome.success and holds)
     reason = f"{outcome.reason}, 서보 6 판독 {grip}" + ("" if holds else f" > {P1_GRIP_READ_MAX}(빈 손으로 봄)")
-    arm.goto(hover)
-    arm.goto(grasp)
-    arm.set_grip("open")
-    arm.goto(hover)
-    arm.goto(PARK_POSE)
+    if grip is not None and grip > P1_GRIP_READ_MAX:  # 빈 손: 닫힌 손끝으로 grasp 높이에 다시 내려가지 않는다. hover에서 열고 park
+        arm.goto(hover)
+        arm.set_grip("open")
+        arm.goto(PARK_POSE)
+    else:
+        arm.goto(hover)
+        arm.goto(grasp)
+        arm.set_grip("open")
+        arm.goto(hover)
+        arm.goto(PARK_POSE)
     if twist_photo:
         camera.snapshot(f"{trial['trial_id']}-putback")  # 도로 놓은 블록의 각도: 집기 전 사진과 비교하면 닫는 동안의 비틀림이다(쓰기 없음)
     ledger.finish(trial["trial_id"], outcome="success" if success else "failed", success=success, reason=reason, read_at_park=read_at_park, grip_read=grip)
@@ -589,6 +594,24 @@ def run_chain(
         holds = grip is not None and grip <= P1_GRIP_READ_MAX
         success = bool(outcome.success and holds)
         reason = f"{outcome.reason}, 서보 6 판독 {grip}" + ("" if holds else f" > {P1_GRIP_READ_MAX}(빈 손으로 봄)")
+        empty = grip is not None and grip > P1_GRIP_READ_MAX
+        if empty:  # 빈 손 실패: 닫힌 손끝(열린 손보다 약 13 mm 낮음)으로 다시 grasp 높이에 내려가지 않는다. hover에서 열고 park(G0d D4)
+            arm.goto(hover)
+            arm.set_grip("open")
+            arm.goto(PARK_POSE)
+            ledger.finish(tid, outcome="failed", success=False, reason=reason, read_at_park=read_at_park, grip_read=grip)
+            last_success = False
+            if not continue_on_miss:
+                raise NeedHuman(f"{tid} 실패({reason}). 빈 손이라 hover에서 열고 park로 돌아왔다. 사람이 확인한다")
+            if rest_every > 0 and k % rest_every == 0 and k < first + count - 1:
+                log(json.dumps({"rest_s": rest_s, "after": tid}, ensure_ascii=False), flush=True)
+                end = clock() + rest_s
+                while clock() < end:
+                    if stop is not None and stop.exists():
+                        ledger.note("stop_requested", trial_id=tid, during="rest")
+                        raise NeedHuman(f"{tid} 뒤 쉬는 중 정지 파일이 있어 멈춘다(팔 park, 쓰기 없음)")
+                    sleep(1.0)
+            continue
         target = (hover, grasp) if not success else (Pose(HOVER, place_row, nxt["j1"], place_j5), Pose(GRASP, place_row, nxt["j1"], place_j5))
         arm.goto(target[0])
         dev_place = abs(place_j5 - 90)
@@ -610,7 +633,7 @@ def run_chain(
         arm.goto(PARK_POSE)
         ledger.finish(tid, outcome="success" if success else "failed", success=success, reason=reason, read_at_park=read_at_park, grip_read=grip)
         last_success = success
-        if not success and not (continue_on_miss and grip is not None and grip > P1_GRIP_READ_MAX):
+        if not success:  # 쥔 값인데 관찰기 실패(오판정 의심) 등: 같은 자리에 도로 놓고 멈춘다
             raise NeedHuman(f"{tid} 실패({reason}). 같은 자리에 도로 놓고 멈춘다. 사람이 확인한다")
         if rest_every > 0 and k % rest_every == 0 and k < first + count - 1:
             log(json.dumps({"rest_s": rest_s, "after": tid}, ensure_ascii=False), flush=True)
@@ -860,7 +883,7 @@ def main() -> None:
     parser.add_argument("--ack", help="chain: 실패·중단한 시도 id를 사람이 확인했다고 기록하고 이어 간다(예: chain-012)")
     parser.add_argument("--r1", type=Path, help="chain: R1 일정 JSON(scripts/r1_cells.py: cells, offsets). 오프셋·확인 상승·빈 손 실패 이어 가기를 함께 켠다")
     parser.add_argument("--align", action="store_true", help="chain: J5로 손을 블록 방향(집기)·반경선(놓기)에 맞춘다(config/l1_yaw.json)")
-    parser.add_argument("--j5", type=int, help="release-here: 멈춘 grasp 자세의 J5")
+    parser.add_argument("--j5", type=int, help="release-here: 멈춘 grasp 자세의 J5. p1-pick: 이 시도의 J5(P2: 있으면 J5 확인 상승·비틀림 사진 모드)")
     parser.add_argument("--hover-only", action="store_true", help="dabai-view: hover에서 신호 뒤 grasp 없이 park로 돌아온다")
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")

@@ -26,7 +26,7 @@ def main() -> None:
     cells = (np.arange(N) + rng.random(N)) / N
     j1 = 72.0 + rng.permutation(cells) * 36.0
     r = 128.0 + rng.permutation(cells) * 32.0
-    j5 = np.concatenate([rng.uniform(62, 70, 4), rng.uniform(110, 118, 4), np.linspace(71, 109, 12) + rng.uniform(-1.5, 1.5, 12)])
+    j5 = np.concatenate([rng.uniform(66, 70, 4), rng.uniform(110, 114, 4), np.linspace(71, 109, 12) + rng.uniform(-1.5, 1.5, 12)])
     j5 = rng.permutation(j5)
     l1, yaw = L1Map(), YawModel()
     targets = []
