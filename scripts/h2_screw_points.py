@@ -5,8 +5,8 @@
 행 차이 ≤ 4 화소, 간격 10~25 화소인 쌍 → 각 점은 DoG 양수 가중 무게중심(하위 화소).
 각 장에서 보드 마커 id 1(36h11, 빨강 채널, 기본 파라미터)의 중심도 기록해 카메라가 움직이지 않았는지 본다.
 영상 가장자리까지의 여백(화소)을 함께 낸다.
-자세와 무관한 넓은 탐색(pose=wide, H3용): 탐색 영역 x 560~1000(왼쪽 위 흰 전원 어댑터를 피함), y 0~430, DoG 임계 = 최대의 0.45,
-성분 면적 6~70화소, 성분 중심 5×5의 최대 밝기 ≥ 190 이고 평균 채도 ≤ 45(흰 나사 머리), 두 성분의 면적비 ≤ 2.5, 간격 11~26화소, 행 차 ≤ 0.25×간격+1.5, 그리고 「어두운 판 위」 조건:
+자세와 무관한 넓은 탐색(pose=wide, H3용): 탐색 영역 x 560~1120(왼쪽 위 흰 전원 어댑터를 피함), y 0~430, DoG 임계 = 최대의 0.45,
+성분 면적 6~70화소, 성분 중심 5×5의 최대 밝기 ≥ 170 이고 평균 채도 ≤ 110(밝은 나사 머리, J1에 따라 분홍빛), 두 성분의 면적비 ≤ 2.5, 간격 11~26화소, 행 차 ≤ 0.25×간격+1.5, 그리고 「어두운 판 위」 조건:
 각 성분 둘레 반지름 8~14화소 고리의 평균 밝기 < 120 이고 두 점 아래쪽(간격×2) 영역 평균 < 110. 후보가 여러 쌍이면 판 조건 점수가 가장 좋은 쌍.
 사용: uv run python scripts/h2_screw_points.py <hover|grasp|wide> <png...>
 """
@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 from cv2 import aruco
 
-ROI = {"hover": (700, 0, 780, 70), "grasp": (690, 70, 770, 140), "wide": (560, 0, 1000, 430)}  # x0, y0, x1, y1 (H2-0 사진 기준 대략 위치)
+ROI = {"hover": (700, 0, 780, 70), "grasp": (690, 70, 770, 140), "wide": (560, 0, 1120, 430)}  # x0, y0, x1, y1 (H2-0 사진 기준 대략 위치)
 
 
 def board_marker_center(path: str):
@@ -60,7 +60,7 @@ def find_pair_wide(path: str):
         px, py = int(round(cx + x0)), int(round(cy + y0))
         patch_g = full[max(py - 2, 0):py + 3, max(px - 2, 0):px + 3]
         patch_s = hsv[max(py - 2, 0):py + 3, max(px - 2, 0):px + 3, 1]
-        if float(patch_g.max()) < 190 or float(patch_s.mean()) > 45:  # 나사 머리는 흰색(밝고 채도 낮음). 분홍 LED·유리 반사와 구분
+        if float(patch_g.max()) < 170 or float(patch_s.mean()) > 110:  # 나사 머리는 밝다(J1을 돌리면 분홍빛이 돈다). 어두운 분홍 LED 등은 밝기로 거른다
             continue
         comps.append((area, cx, cy, _ring_mean(g, cx, cy)))
     best, best_score = None, None
@@ -84,6 +84,20 @@ def find_pair_wide(path: str):
     if best is None:
         return None
     return best if best[0][1] < best[1][1] else (best[1], best[0])
+
+
+def refine_pair(path: str, guess_left, guess_right, half=8):
+    """눈으로 확인한 두 나사 머리 위치(guess) 주변에서 DoG 양수 가중 무게중심으로 하위 화소 위치를 구한다."""
+    g = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2GRAY).astype(np.float32)
+    d = cv2.GaussianBlur(g, (0, 0), 1.0) - cv2.GaussianBlur(g, (0, 0), 4.0)
+    out = []
+    for gx, gy in (guess_left, guess_right):
+        x0, y0 = int(round(gx)) - half, int(round(gy)) - half
+        win = d[y0:y0 + 2 * half + 1, x0:x0 + 2 * half + 1]
+        ys, xs = np.nonzero(win > 0.6 * win.max())
+        w = np.clip(win[ys, xs], 0, None)
+        out.append((int(len(xs)), float((xs * w).sum() / w.sum() + x0), float((ys * w).sum() / w.sum() + y0)))
+    return tuple(out)
 
 
 def find_pair(path: str, pose: str):

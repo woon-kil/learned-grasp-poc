@@ -4,6 +4,7 @@
 모델 A (모수 9): Gemini 카메라 자세(회전 rvec 3, 이동 t 3: 베이스 좌표 → 카메라 좌표) + 나사점의 Arm4_Link 좌표 s(3, mm).
 투영: Arm4_Link FK(URDF, 모델 값, 명령 관절값)로 베이스 좌표를 얻고 카메라 좌표로 바꾼 뒤 cv2.projectPoints(내부 파라미터와 왜곡 포함).
 모델 B (탐색용, 모수 13): A + 관절 J1~J4 상수 오프셋(도). 판정에는 A만 쓴다.
+모델 J (사후 탐색, 모수 10): A + J1 오프셋 1개. 모델 R (사후 탐색, 모수 13): B에 오프셋 σ=2° 규제(퇴화 방지). A 판정 뒤에 추가한 탐색이다.
 최적화: Levenberg–Marquardt(numpy, 수치 야코비안), 여러 초기값. 교차 검증은 고유 자세 하나를 빼고 맞춘 뒤 예측.
 
 입력 JSON: {"camera_info": "경로", "poses": [{"id": "...", "unique": "고유키", "q": [J1,J2,J3,J4,J5], "u": 열, "v": 행}, ...]}
@@ -44,9 +45,19 @@ def project(params, qs, K, D, joint_offsets=None):
     return uv.reshape(-1, 2)
 
 
+def offsets(x, model):
+    if model in ("B", "R"):
+        return x[9:13]
+    if model == "J":
+        return np.array([x[9], 0.0, 0.0, 0.0])
+    return None
+
+
 def residuals(x, qs, uv, K, D, model):
-    off = x[9:13] if model == "B" else None
-    return (project(x[:9], qs, K, D, off) - uv).ravel()
+    res = (project(x[:9], qs, K, D, offsets(x, model)) - uv).ravel()
+    if model == "R":
+        res = np.r_[res, x[9:13] / 2.0]  # 오프셋 2°를 1화소 잔차와 같은 비용으로 본다
+    return res
 
 
 def lm(fun, x0, iters=80):
@@ -100,8 +111,10 @@ def fit(qs, uv, K, D, model="A", seed=0):
     rng = np.random.default_rng(seed)
     best = None
     for x0 in initial_guesses(qs, uv, K, D, rng):
-        if model == "B":
+        if model in ("B", "R"):
             x0 = np.r_[x0, np.zeros(4)]
+        elif model == "J":
+            x0 = np.r_[x0, 0.0]
         x, cost, J = lm(lambda x: residuals(x, qs, uv, K, D, model), x0)
         if best is None or cost < best[1]:
             best = (x, cost, J)
@@ -114,8 +127,7 @@ def loo(qs, uv, uniq, K, D, model="A"):
         keep = [i for i, u in enumerate(uniq) if u != key]
         test = [i for i, u in enumerate(uniq) if u == key]
         x, _, _ = fit([qs[i] for i in keep], uv[keep], K, D, model)
-        off = x[9:13] if model == "B" else None
-        pred = project(x[:9], [qs[i] for i in test], K, D, off)
+        pred = project(x[:9], [qs[i] for i in test], K, D, offsets(x, model))
         out.append((key, float(np.linalg.norm(pred - uv[test], axis=1).mean())))
     return out
 
@@ -127,9 +139,9 @@ def report(data, selftest=False):
     uv = np.array([[p["u"], p["v"]] for p in poses], float)
     uniq = [p["unique"] for p in poses]
     out = {"points": len(poses), "unique_poses": len(set(uniq))}
-    for model in ("A", "B"):
+    for model in ("A", "J", "R", "B"):
         x, cost, J = fit(qs, uv, K, D, model)
-        fit_res = np.linalg.norm(residuals(x, qs, uv, K, D, model).reshape(-1, 2), axis=1)
+        fit_res = np.linalg.norm((project(x[:9], qs, K, D, offsets(x, model)) - uv), axis=1)
         sv = np.linalg.svd(J, compute_uv=False)
         cv = loo(qs, uv, uniq, K, D, model)
         errs = np.array([e for _, e in cv])
