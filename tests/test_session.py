@@ -971,28 +971,72 @@ def test_chain_default_confirms_only_the_first_pick(ready_config, tmp_path):
     assert [finished[t]["outcome"] for t in ("chain-001", "chain-002", "chain-003")] == ["success"] * 3
 
 
-def test_chain_rests_every_n_closes_without_writes(ready_config, tmp_path):
-    rests = []
-    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}, {"r_index": 4, "j1": 90}]
-    # 쉼은 sleep(rest_s)로 부른다. _chain_run의 sleep은 신호만 쓰므로 여기서 직접 구성한다.
+def _rest_rig(ready_config, tmp_path, stop=None, stop_when_rest=False, rest_every=2):
     from learned_grasp.g0_runner import Outcome
     from learned_grasp.session import run_chain
 
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}, {"r_index": 4, "j1": 90}]
     table = generate(ready_config.table)
     fake = _GripFake(148)
     arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
     signal = tmp_path / "dabai_next"
     queue = iter([_measured(85.2, 140.0), _measured(99.8, 150.0), _measured(76.1, 129.7)])
-    writes_at_rest = []
+    now = [0.0]
+    sleeps = []
 
     def sleep(seconds):
-        if seconds == 123.0:
-            rests.append(seconds)
-            writes_at_rest.append(len(fake.writes))
-        elif not signal.exists():
+        sleeps.append(seconds)
+        now[0] += seconds
+        if seconds == 1.0 and stop_when_rest and now[0] > 5.0 and stop is not None:
+            stop.write_text("1")
+        if not signal.exists() and not stop_when_rest:
+            signal.write_text("1")
+        if not signal.exists() and stop_when_rest:
             signal.write_text("1")
 
-    run_chain(arm, _ChainCam(), lambda t: Outcome(True, "관찰기"), AttemptLedger(tmp_path / "chain.jsonl"), ready_config, table, cells, 3, signal,
-              lambda path: next(queue), hold_s=0.0, sleep=sleep, clock=lambda: 0.0, log=lambda *a, **k: None, rest_every=2, rest_s=123.0)
-    assert rests == [123.0]  # 2번째 닫기 뒤 한 번만(마지막 시도 뒤에는 쉬지 않는다)
-    assert writes_at_rest and writes_at_rest[0] == len(fake.writes) - 10  # 쉬는 동안 쓰기 없음, 그 뒤 3번째 시도 10회
+    ledger = AttemptLedger(tmp_path / "chain.jsonl")
+    error = None
+    try:
+        run_chain(arm, _ChainCam(), lambda t: Outcome(True, "관찰기"), ledger, ready_config, table, cells, 3, signal, lambda path: next(queue),
+                  hold_s=0.0, sleep=sleep, clock=lambda: now[0], log=lambda *a, **k: None, rest_every=rest_every, rest_s=10.0, stop=stop)
+    except NeedHuman as exc:
+        error = exc
+    return fake, ledger, sleeps, error
+
+
+def test_chain_rests_every_n_closes_without_writes(ready_config, tmp_path):
+    fake, ledger, sleeps, error = _rest_rig(ready_config, tmp_path)
+    assert error is None
+    assert sum(1 for s in sleeps if s == 1.0) >= 10  # 쉬는 동안 1초씩 기다렸다(마지막 시도 뒤에는 쉬지 않는다)
+    finished, _ = ledger.state()
+    assert len(finished) == 3 and len(fake.writes) == 31  # 첫 시도 park 1 + 시도당 10: 쉬는 동안 쓰기 없음
+
+
+def test_chain_stop_file_stops_between_trials_without_writes(ready_config, tmp_path):
+    stop = tmp_path / "chain_stop"
+    stop.write_text("1")
+    fake, ledger, sleeps, error = _rest_rig(ready_config, tmp_path, stop=stop)
+    assert isinstance(error, NeedHuman) and "정지 파일" in str(error) and fake.writes == []
+    assert any(r.get("kind") == "stop_requested" for r in ledger.records())
+
+
+def test_chain_stop_file_during_rest_stops_at_park(ready_config, tmp_path):
+    stop = tmp_path / "chain_stop"
+    fake, ledger, sleeps, error = _rest_rig(ready_config, tmp_path, stop=stop, stop_when_rest=True)
+    assert isinstance(error, NeedHuman) and "쉬는 중" in str(error)
+    finished, _ = ledger.state()
+    assert len(finished) == 2 and all(r["outcome"] == "success" for r in finished.values())  # 2번째 닫기 뒤 쉼에서 멈춤
+    assert tuple(fake.writes[-1][0]) == tuple(generate(ready_config.table) and SafetyGate(ready_config, generate(ready_config.table)).joints(PARK_POSE))
+
+
+def test_chain_resumes_after_failure_only_with_acknowledgement(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}, {"r_index": 4, "j1": 90}]
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 1, grip_after=P1_GRIP_READ_MAX + 3)
+    assert isinstance(error, NeedHuman)
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 1, ledger=ledger)
+    assert isinstance(error, SafetyViolation) and "--ack" in str(error)
+    ledger.note("acknowledged", trial_id="chain-001")
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(76.1, 129.7)], cells, 1, ledger=ledger)
+    assert error is None
+    start = [r for r in ledger.records() if r.get("event") == "start"][1]
+    assert start["trial_id"] == "chain-002" and start["placed_at"] is None and start["same_cell"] is False  # 실패 뒤라 직전 놓은 자리를 모른다
