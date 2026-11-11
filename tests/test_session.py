@@ -1409,19 +1409,40 @@ def test_hover_sweep_visits_only_hover_poses_via_park_and_never_grasps(ready_con
     fake = _GripFake(148)
     arm = SafeArm(fake, gate, sleep=lambda _: None)
     signal = tmp_path / "dabai_next"
-    arrivals = []
 
     def sleep(_):
         if not signal.exists():
             signal.write_text("1")
 
     cam = _ChainCam()
-    run_hover_sweep(arm, cam, signal, 5, 90, sleep=sleep, clock=lambda: 0.0, log=lambda line, **k: arrivals.append(line))
+    run_hover_sweep(arm, cam, signal, 5, 90, folder=tmp_path, sleep=sleep, clock=lambda: 0.0, log=lambda *a, **k: None)
     poses = hover_sweep_poses(5, 90)
     assert len(poses) == 14 and all(p.kind == HOVER for _, p in poses)  # grasp 자세가 없다
-    assert [n for n in cam.snaps] == [f"sweep-{n}" for n, _ in poses]
+    assert [n for n, _ in poses][0] == "ref-1" and [n for n, _ in poses][-1] == "ref-3" and "ref-2" in [n for n, _ in poses][1:-1]  # 기준 재방문이 시작·중간·끝
+    assert cam.snaps == [f"sweep-{n}-{ab}" for n, _ in poses for ab in "ab"]  # 자세마다 2장
     grasp_joints = {tuple(gate.joints(Pose(GRASP, 5, j1, j5))) for j1 in range(70, 111) for j5 in range(60, 121)}
     assert not any(tuple(w[0]) in grasp_joints for w in fake.writes)
-    assert len(fake.writes) == 1 + 2 * 14  # 처음 park + 자세마다 hover·park
-    assert all(w[1] == ready_config.open_sdk for w in fake.writes)  # 손은 열린 채
+    assert len(fake.writes) == 1 + 2 * 14  # 처음 park + 자세마다 hover·park, 사진·읽기는 쓰기가 아니다
+    assert all(w[1] == ready_config.open_sdk for w in fake.writes)
     assert arm.pose == PARK_POSE
+    lines = [json.loads(l) for l in (tmp_path / "sweep.jsonl").read_text().splitlines()]
+    assert len(lines) == 14 and lines[0]["pose"] == "ref-1" and lines[0]["read"] is not None  # 읽은 관절값 기록
+
+
+def test_hover_sweep_stops_between_poses_when_stop_file_exists(ready_config, tmp_path):
+    from learned_grasp.session import run_hover_sweep
+
+    table = generate(ready_config.table)
+    fake = _GripFake(148)
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    signal = tmp_path / "dabai_next"
+    stop = tmp_path / "chain_stop"
+    stop.write_text("1")
+
+    def sleep(_):
+        if not signal.exists():
+            signal.write_text("1")
+
+    cam = _ChainCam()
+    run_hover_sweep(arm, cam, signal, 5, 90, folder=tmp_path, stop=stop, sleep=sleep, clock=lambda: 0.0, log=lambda *a, **k: None)
+    assert cam.snaps == [] and len(fake.writes) == 1 and arm.pose == PARK_POSE  # 첫 park 뒤 자세 전에 멈춤

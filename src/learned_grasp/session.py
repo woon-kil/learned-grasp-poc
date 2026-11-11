@@ -392,17 +392,22 @@ HOVER_SWEEP_J1_DELTA = (-10, -5, 5, 10)
 
 
 def hover_sweep_poses(r_index: int, j1: int) -> list[tuple[str, Pose]]:
-    """hover만 도는 자세 목록(H4 손끝 검출 점검). J5 7단계(J1 고정), J1 4단계(J5 90), 기준 자세 재방문 3번. grasp 자세는 없다."""
-    poses = [(f"j5-{j5}", Pose(HOVER, r_index, j1, j5)) for j5 in HOVER_SWEEP_J5]
+    """hover만 도는 자세 목록(H4 손끝 검출 점검). 기준(J1·J5 90) 재방문 3번을 시작·중간·끝에 둔다. grasp 자세는 없다."""
+    ref = lambda i: (f"ref-{i}", Pose(HOVER, r_index, j1, 90))
+    poses = [ref(1)]
+    poses += [(f"j5-{j5}", Pose(HOVER, r_index, j1, j5)) for j5 in HOVER_SWEEP_J5]
+    poses += [ref(2)]
     poses += [(f"j1{d:+d}", Pose(HOVER, r_index, j1 + d, 90)) for d in HOVER_SWEEP_J1_DELTA]
-    poses += [(f"ref-{i}", Pose(HOVER, r_index, j1, 90)) for i in (1, 2, 3)]
+    poses += [ref(3)]
     return poses
 
 
-def run_hover_sweep(arm: SafeArm, camera, signal: Path, r_index: int, j1: int, wait_s: float = 300.0, sleep=None, clock=None, log=print) -> None:
-    """park→hover→(사진)→park를 자세마다 반복한다. 열린 손, 닫지 않음, grasp 없음. 시작 전에 한 번 확인 신호를 기다린다.
+def run_hover_sweep(arm: SafeArm, camera, signal: Path, r_index: int, j1: int, folder: Path | None = None, stop: Path | None = None,
+                    wait_s: float = 300.0, settle_s: float = 1.5, sleep=None, clock=None, log=print) -> None:
+    """park→hover→(대기, 사진 2장, 읽은 관절 기록)→park를 자세마다 반복한다. 열린 손, 닫지 않음, grasp 없음. 시작 전에 한 번 확인 신호를 기다린다.
 
-    hover↔hover는 게이트가 허용하지 않아 자세마다 park를 거친다. 사진 이름은 `sweep-<자세 이름>`이고 쓰기 없이 찍는다.
+    hover↔hover는 게이트가 허용하지 않아 자세마다 park를 거친다. 사진은 `sweep-<이름>-a/-b`이고 쓰기 없이 찍는다.
+    folder가 있으면 도착 뒤 읽은 관절값(`arm.read()`, 쓰기 없음)을 `sweep.jsonl`에 남긴다. stop 파일이 있으면 자세 사이에 park에서 멈춘다.
     """
     import time as _time
 
@@ -414,8 +419,19 @@ def run_hover_sweep(arm: SafeArm, camera, signal: Path, r_index: int, j1: int, w
     arm.goto(PARK_POSE)
     _wait_dabai_signal(signal, "sweep", wait_s, sleep, clock, log)
     for name, pose in poses:
+        if stop is not None and stop.exists():
+            log(json.dumps({"stopped": "stop file", "before": name}, ensure_ascii=False), flush=True)
+            return
         arm.goto(pose)
-        camera.snapshot(f"sweep-{name}")
+        sleep(settle_s)
+        camera.snapshot(f"sweep-{name}-a")
+        sleep(1.0)
+        camera.snapshot(f"sweep-{name}-b")
+        reading = arm.read()
+        record = {"pose": name, "commanded": list(arm.gate.joints(pose)), "read": reading.get("values"), "frames": [f"sweep-{name}-a", f"sweep-{name}-b"]}
+        if folder is not None:
+            with (Path(folder) / "sweep.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
         arm.goto(PARK_POSE)
         log(json.dumps({"sweep": name, "j1": pose.j1, "j5": pose.j5}, ensure_ascii=False), flush=True)
 
@@ -1079,7 +1095,7 @@ def main() -> None:
         elif args.command == "hover-sweep":
             camera = P620Camera(f"runs/{approval.session_id}/frames")
             try:
-                run_hover_sweep(arm, camera, folder / "dabai_next", args.r_index, args.j1)
+                run_hover_sweep(arm, camera, folder / "dabai_next", args.r_index, args.j1, folder=folder, stop=folder / "chain_stop")
             finally:
                 camera.close()
         elif args.command == "release-here":
