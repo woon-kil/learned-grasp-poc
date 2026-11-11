@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -34,7 +35,7 @@ from learned_grasp.attempts import AttemptLedger
 from learned_grasp.camera import P620Camera
 from learned_grasp.config import Config, load_config
 from learned_grasp.g0_runner import Outcome, compute_tolerance, dryrun_sheet, run_dryrun, run_replay, tolerance_variants
-from learned_grasp.l1 import J5_RANGE, YawModel, block_from_image, plan, plan_aligned
+from learned_grasp.l1 import J1_RANGE, J5_RANGE, L1Map, YawModel, block_from_image, plan, plan_aligned, signed_diff
 from learned_grasp.pose_table import PoseTable, generate
 from learned_grasp.safety import GRASP, GRIP_SWEEP_MAX_SDK, GRIP_SWEEP_STEP, HOVER, PARK_POSE, Pose, SafetyGate, SafetyViolation
 
@@ -499,6 +500,8 @@ def run_chain(
     continue_on_miss: bool = False,
     place_j5_schedule: list[int | None] | None = None,
     j5_clamp_margin: float = 0.0,
+    j1_offsets: list[int] | None = None,
+    confirm_j1_abs_ge: int | None = None,
 ) -> None:
     """연쇄 종단 시험. park 사진 → L1이 고른 자리에서 집기 → park → 목록의 다음 자리에 내려놓기를 count번 이어 간다.
 
@@ -506,6 +509,7 @@ def run_chain(
     align면 J5로 손을 블록 방향에 맞추고(plan_aligned) 놓는 자리에서도 J5로 손을 반경선에 맞춘다(YawModel). J5 ≠ 90 하강은 처음 한 번씩만 확인한다.
     offsets(R1 반경 허용 측정)면 k번째 시도는 L1 행에서 offsets[k-1]행 옮겨 집고(실제 행은 0~9로 자른다), 블록이 공칭 자리 근처에 놓이도록 놓는 손 행을 공칭 행 + 실제 오프셋으로 한다. J5는 실제 행으로 다시 계산한다.
     place_j5_schedule(X1)이 있으면 k번째 시도의 놓기 J5를 그 값으로 한다(None이면 정렬 J5). j5_clamp_margin은 plan_aligned에 넘겨 범위 끝 이내로 벗어난 J5를 자른다. 중간 거절 뒤 사람이 다시 놓은 시도는 human_placed로 기록한다.
+    j1_offsets(X2 횡방향 허용 측정)가 있으면 k번째 시도는 L1이 정한 J1에서 j1_offsets[k-1]° 옮겨 집는다(손만 횡방향 이동). J1이 바뀌면 팔 전체가 돌아 손의 세계 각도가 바뀌므로 d를 집는 자리의 반경선 기준으로 다시 계산해 J5를 정한다. 놓는 손 J1은 공칭(닫을 때 블록이 두 손가락 가운데로 밀리므로). confirm_j1_abs_ge 이상인 오프셋 집기는 매번 확인한다.
     escalate면 |J5−90|이 이전 확인 최대보다 10° 이상 커질 때, 처음 오프셋 3 집기·처음 오프셋 놓기에도 확인을 받는다. continue_on_miss(R1 전용)면 빈 손(서보 > 기준)으로 실패한 시도 뒤에도 이어 간다(다음 사진·L1이 받아들이지 않으면 멈춘다).
     성공 = P1과 같다(관찰기 그리고 서보 6 판독). L1이 거절(검출 실패, 구역·방향 밖)하거나 시도가 실패하거나 확인 신호가 없으면
     쓰기 없이(실패면 P1처럼 같은 자리에 도로 놓고) 멈춘다. 자동 복구 이동은 없다. cells[k-1]이 k번째 시도의 내려놓을 자리다.
@@ -529,6 +533,7 @@ def run_chain(
     if stopped:
         raise SafetyViolation(f"중단·실패한 시도가 있어 사람 확인 전에는 진행하지 않는다(--ack): {stopped}")
     yaw = yaw or (YawModel() if align else None)
+    l1_for_radial = L1Map()
     confirmed_j5 = {"pick": False, "place": False}
     conf = {"hi": None, "lo": None, "off_pick": False, "off_place": False}  # 방향(J5>90, J5<90)별로 확인한 최대 편차
     n_rows = len(table.entries)
@@ -557,24 +562,39 @@ def run_chain(
         if align and delta_actual != 0:  # 행이 바뀌면 손 yaw 모델의 행 항이 바뀐다
             wanted = yaw.j5_for(planned.d_deg, planned.j1, r_pick)
             if not (J5_RANGE[0] <= round(wanted) <= J5_RANGE[1]):
-                ledger.note("rejected", trial_id=tid, reason=f"오프셋 행에서 J5 {wanted:.0f}이 범위 밖", **planned.asdict())
+                ledger.note("rejected", trial_id=tid, **{**planned.asdict(), "reason": f"오프셋 행에서 J5 {wanted:.0f}이 범위 밖"})
                 raise NeedHuman(f"{tid}: 오프셋 {delta_actual:+d}행에서 J5 {wanted:.0f}이 범위 밖이라 시도하지 않는다")
             pick_j5 = int(round(wanted))
+        d1 = j1_offsets[k - 1] if j1_offsets else 0
+        j1_pick = planned.j1 + d1
+        if d1 != 0:
+            if not (J1_RANGE[0] <= j1_pick <= J1_RANGE[1]):
+                ledger.note("rejected", trial_id=tid, **{**planned.asdict(), "reason": f"J1 오프셋 {d1:+d}° 뒤 J1 {j1_pick}이 범위 밖"})
+                raise NeedHuman(f"{tid}: J1 오프셋 {d1:+d}°로 J1 {j1_pick}이 범위 밖이라 시도하지 않는다")
+            if align:  # 팔 전체가 돈다: d를 집는 자리의 반경선 기준으로 다시 구해 J5를 정한다
+                radial_pick = l1_for_radial.radial_angle_deg(j1_pick, table.entries[r_pick].r_mm) % 180.0
+                d_pick = signed_diff(planned.block_angle_deg, radial_pick)
+                wanted = yaw.j5_for(d_pick, j1_pick, r_pick)
+                if not (J5_RANGE[0] <= round(wanted) <= J5_RANGE[1]):
+                    ledger.note("rejected", trial_id=tid, **{**planned.asdict(), "reason": f"J1 오프셋 행에서 J5 {wanted:.0f}이 범위 밖"})
+                    raise NeedHuman(f"{tid}: J1 오프셋 {d1:+d}°에서 J5 {wanted:.0f}이 범위 밖이라 시도하지 않는다")
+                pick_j5 = int(round(wanted))
         place_row = min(max(nxt["r_index"] + delta_actual, 0), n_rows - 1)
         place_j5 = yaw.place_j5(nxt["j1"], place_row) if align else 90
         if align and place_j5_schedule and place_j5_schedule[k - 1] is not None:
             place_j5 = int(place_j5_schedule[k - 1])
-        trial = {"trial_id": tid, "r_index": r_pick, "j1": planned.j1, "j5": pick_j5, "before_frame": frame}
+        trial = {"trial_id": tid, "r_index": r_pick, "j1": j1_pick, "j5": pick_j5, "before_frame": frame}
         human_placed = rejected_before > 0  # L1 거절 뒤 사람이 다시 놓은 블록은 팔이 만든 방향이 아니다
         previous = cells[k - 2] if k > 1 and last_success and not human_placed else None  # 직전 시도가 이 블록을 내려놓은 자리(성공일 때만 알 수 있다)
         same_cell = previous is not None and (previous["r_index"], previous["j1"]) == (planned.r_index, planned.j1)  # L1이 고른 자리 기준(오프셋 전)
-        hover = Pose(HOVER, r_pick, planned.j1, pick_j5)
-        grasp = Pose(GRASP, r_pick, planned.j1, pick_j5)
+        hover = Pose(HOVER, r_pick, j1_pick, pick_j5)
+        grasp = Pose(GRASP, r_pick, j1_pick, pick_j5)
         if arm.pose != PARK_POSE:
             arm.goto(PARK_POSE)
         arm.goto(hover)
         ledger.start(trial, joints_grasp=arm.gate.joints(grasp), joints_hover=arm.gate.joints(hover), plan=planned.asdict(), place_at={"r_index": nxt["r_index"], "j1": nxt["j1"]}, placed_at=previous, same_cell=same_cell, pick_j5=pick_j5, place_j5=place_j5,
-                     offset=delta_actual, r_l1=planned.r_index, r_pick=r_pick, place_row=place_row, human_placed=human_placed, clamped=planned.clamped if align else False)
+                     offset=delta_actual, r_l1=planned.r_index, r_pick=r_pick, place_row=place_row, human_placed=human_placed, clamped=planned.clamped if align else False,
+                     j1_offset=d1, j1_l1=planned.j1, lateral_mm=round(d1 * table.entries[r_pick].r_mm * math.pi / 180.0, 2))
         need_j5 = align and not escalate and pick_j5 != 90 and not confirmed_j5["pick"]  # escalate(R1·X1)는 방향별 상승 규칙만 쓴다
         dev_pick = abs(pick_j5 - 90)
         side_pick = "hi" if pick_j5 > 90 else "lo"
@@ -583,12 +603,16 @@ def run_chain(
             mx = conf[side]
             return (mx is None and dev >= 15) or (mx is not None and dev >= mx + 10)
 
-        need_esc = escalate and (side_need(side_pick, dev_pick) or (abs(delta_actual) >= 3 and not conf["off_pick"]))
+        side_j1 = "p" if d1 > 0 else "m"
+        need_j1 = d1 != 0 and ((confirm_j1_abs_ge is not None and abs(d1) >= confirm_j1_abs_ge) or not conf.get("j1" + side_j1))
+        need_esc = escalate and (side_need(side_pick, dev_pick) or (abs(delta_actual) >= 3 and not conf["off_pick"]) or need_j1)
         if confirm_each or k == first or need_j5 or need_esc:
             confirmed_j5["pick"] = confirmed_j5["pick"] or pick_j5 != 90
             if dev_pick >= 15:
                 conf[side_pick] = dev_pick if conf[side_pick] is None else max(conf[side_pick], dev_pick)
             conf["off_pick"] = conf["off_pick"] or abs(delta_actual) >= 3
+            if d1 != 0:
+                conf["j1" + side_j1] = True
             try:
                 _wait_dabai_signal(signal, "descend", wait_s, sleep, clock, log)
             except NeedHuman:
@@ -898,6 +922,7 @@ def main() -> None:
     parser.add_argument("--ack", help="chain: 실패·중단한 시도 id를 사람이 확인했다고 기록하고 이어 간다(예: chain-012)")
     parser.add_argument("--r1", type=Path, help="chain: R1 일정 JSON(scripts/r1_cells.py: cells, offsets). 오프셋·확인 상승·빈 손 실패 이어 가기를 함께 켠다")
     parser.add_argument("--x1", type=Path, help="chain: X1 일정 JSON(scripts/x1_schedule.py: cells, place_j5). J5 극단 놓기·확인 상승·범위 끝 4° 자르기를 켠다")
+    parser.add_argument("--x2", type=Path, help="chain: X2 일정 JSON(scripts/x2_schedule.py: cells, j1_offsets, confirm_abs_ge). 횡방향 J1 오프셋, 빈 손 실패 이어 가기를 켠다")
     parser.add_argument("--align", action="store_true", help="chain: J5로 손을 블록 방향(집기)·반경선(놓기)에 맞춘다(config/l1_yaw.json)")
     parser.add_argument("--j5", type=int, help="release-here: 멈춘 grasp 자세의 J5. p1-pick: 이 시도의 J5(P2: 있으면 J5 확인 상승·비틀림 사진 모드)")
     parser.add_argument("--hover-only", action="store_true", help="dabai-view: hover에서 신호 뒤 grasp 없이 park로 돌아온다")
@@ -946,7 +971,7 @@ def main() -> None:
         raise SystemExit("p1-pick은 --r-index, --j1, --trial이 필요하다")
     if args.command == "release-here" and (args.r_index is None or args.j1 is None or args.j5 is None):
         raise SystemExit("release-here는 --r-index, --j1, --j5가 필요하다")
-    if args.command == "chain" and ((args.cells is None and args.r1 is None and args.x1 is None) or args.count is None or args.count < 1):
+    if args.command == "chain" and ((args.cells is None and args.r1 is None and args.x1 is None and args.x2 is None) or args.count is None or args.count < 1):
         raise SystemExit("chain은 --cells(또는 --r1, --x1)와 1 이상의 --count가 필요하다")
     if args.command == "grip-max":
         if args.z_offset != 15 or args.r_index is None:
@@ -1012,10 +1037,11 @@ def main() -> None:
                     raise FileNotFoundError(f"사진을 읽지 못했다: {path}")
                 return block_from_image(image, board_ref)
 
-            schedule = json.loads((args.r1 or args.x1 or args.cells).read_text(encoding="utf-8"))
+            schedule = json.loads((args.r1 or args.x1 or args.x2 or args.cells).read_text(encoding="utf-8"))
             cells = schedule["cells"]
             offsets = schedule["offsets"] if args.r1 else None
             place_schedule = schedule["place_j5"] if args.x1 else None
+            j1_offsets = schedule["j1_offsets"] if args.x2 else None
             chain_ledger = AttemptLedger(folder / "chain.jsonl")
             if args.ack:
                 chain_ledger.close_interrupted()  # 끝나지 않은 시도(프로세스가 예외로 끝남)를 먼저 중단으로 닫아야 확인 대상이 된다
@@ -1027,9 +1053,10 @@ def main() -> None:
             try:
                 run_chain(arm, camera, make_pick_observer(camera), chain_ledger, config, table, cells, args.count,
                           folder / "dabai_next", measure, min(args.hold_sec or 5.0, 60.0),
-                          confirm_each=args.confirm_each, rest_every=args.rest_every, rest_s=args.rest_sec, stop=folder / "chain_stop", align=args.align or args.r1 is not None or args.x1 is not None,
-                          offsets=offsets, escalate=args.r1 is not None or args.x1 is not None, continue_on_miss=args.r1 is not None,
-                          place_j5_schedule=place_schedule, j5_clamp_margin=4.0 if args.x1 else 0.0)
+                          confirm_each=args.confirm_each, rest_every=args.rest_every, rest_s=args.rest_sec, stop=folder / "chain_stop", align=args.align or args.r1 is not None or args.x1 is not None or args.x2 is not None,
+                          offsets=offsets, escalate=args.r1 is not None or args.x1 is not None or args.x2 is not None, continue_on_miss=args.r1 is not None or args.x2 is not None,
+                          place_j5_schedule=place_schedule, j5_clamp_margin=4.0 if args.x1 else 0.0,
+                          j1_offsets=j1_offsets, confirm_j1_abs_ge=schedule.get("confirm_abs_ge") if args.x2 else None)
             finally:
                 camera.close()
         elif args.command == "grip-max":

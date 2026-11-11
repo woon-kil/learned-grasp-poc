@@ -1263,3 +1263,54 @@ def test_chain_escalation_confirms_each_side_of_j5_separately(ready_config, tmp_
               hold_s=0.0, sleep=sleep, clock=lambda: 0.0, log=log, align=True, escalate=True, place_j5_schedule=schedule, j5_clamp_margin=4.0, rest_every=0)
     # 첫 집기, 높은 쪽 첫 극단 놓기(112), 낮은 쪽 첫 극단 놓기(64). 같은 쪽 두 번째 극단 집기는 확인 없음
     assert arrivals == ["descend", "place", "place"], arrivals
+
+
+def test_chain_j1_offset_recomputes_j5_for_base_rotation_and_places_at_nominal(ready_config, tmp_path):
+    from learned_grasp.g0_runner import Outcome
+    from learned_grasp.l1 import L1Map, YawModel, signed_diff
+    from learned_grasp.session import run_chain
+
+    yaw, l1 = YawModel(), L1Map()
+    table = generate(ready_config.table)
+    rows = [e.r_mm for e in table.entries]
+    cells = [{"r_index": 5, "j1": 92}, {"r_index": 4, "j1": 84}]
+    first = _aligned(90.0, rows[4], 4, 90)
+    second = _aligned(92.0, rows[5], 5, yaw.place_j5(92, 5))
+    fake = _GripFake(148)
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    signal = tmp_path / "dabai_next"
+    arrivals = []
+
+    def log(line, **k):
+        if "arrived" in line:
+            arrivals.append(json.loads(line)["arrived"])
+
+    def sleep(_):
+        if not signal.exists():
+            signal.write_text("1")
+
+    queue = iter([first, second])
+    ledger = AttemptLedger(tmp_path / "chain.jsonl")
+    run_chain(arm, _ChainCam(), lambda t: Outcome(True, "관찰기"), ledger, ready_config, table, cells, 2, signal, lambda path: next(queue), hold_s=0.0, sleep=sleep, clock=lambda: 0.0,
+              log=log, align=True, escalate=True, continue_on_miss=True, j1_offsets=[2, -1], confirm_j1_abs_ge=2, rest_every=0)
+    s1, s2 = [r for r in ledger.records() if r.get("event") == "start"]
+    assert (s1["j1_offset"], s1["j1"], s1["j1_l1"]) == (2, 92, 90) and s1["lateral_mm"] > 0  # J1 +2° → 횡방향 약 +5 mm
+    # 손의 세계 각도가 블록과 같다: 모델이 말하는 손 방향 = 집는 자리의 반경선 기준 블록 방향
+    block_angle = s1["plan"]["block_angle_deg"]
+    d_pick = signed_diff(block_angle, l1.radial_angle_deg(92, rows[4]) % 180.0)
+    assert abs(yaw.hand_d(s1["pick_j5"], 92, 4) - d_pick) < 1.0
+    assert s2["j1_offset"] == -1 and s2["j1"] == s2["j1_l1"] - 1
+    # 놓는 손 J1은 공칭(오프셋 없음)
+    gate = arm.gate
+    assert tuple(gate.joints(Pose(HOVER, 5, 92, s1["place_j5"]))) in [tuple(w[0]) for w in fake.writes]
+    # Δ=2 집기는 확인(|Δ| ≥ 2 모두), Δ=−1은 그 방향 첫 오프셋이라 확인, 첫 집기도 확인
+    assert arrivals.count("descend") >= 2
+
+
+def test_chain_j1_offset_rejects_when_pick_j1_leaves_range(ready_config, tmp_path):
+    table = generate(ready_config.table)
+    rows = [e.r_mm for e in table.entries]
+    cells = [{"r_index": 5, "j1": 92}]
+    edge = _aligned(109.0, rows[4], 4, 90)  # L1 J1 109에서 +2° → 111 범위 밖
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [edge], cells, 1, align=True, j1_offsets=[2])
+    assert isinstance(error, NeedHuman) and "범위 밖" in str(error) and fake.writes == []

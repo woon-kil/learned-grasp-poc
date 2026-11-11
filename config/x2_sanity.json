@@ -1,0 +1,25 @@
+{
+ "seed": 20261116,
+ "stage": "sanity",
+ "n": 3,
+ "cells": [
+  {
+   "r_index": 4,
+   "j1": 77
+  },
+  {
+   "r_index": 4,
+   "j1": 92
+  },
+  {
+   "r_index": 6,
+   "j1": 95
+  }
+ ],
+ "j1_offsets": [
+  0,
+  1,
+  -1
+ ],
+ "confirm_abs_ge": null
+}
