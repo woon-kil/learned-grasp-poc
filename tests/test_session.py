@@ -1103,3 +1103,78 @@ def test_release_here_refuses_when_reading_does_not_match(ready_config):
     with pytest.raises(SafetyViolation, match="맞지 않아"):
         release_here(arm, 1, 76, 93)
     assert len(fake.writes) == 1
+
+
+# --- R1 반경 오프셋, 빈 손 실패 이어 가기, P2 J5 확인 상승·비틀림 사진 ------------------------------------------
+
+
+def _rows(ready_config):
+    return [e.r_mm for e in generate(ready_config.table).entries]
+
+
+def test_chain_offsets_shift_pick_row_recompute_j5_and_compensate_place_row(ready_config, tmp_path):
+    from learned_grasp.l1 import YawModel
+
+    yaw = YawModel()
+    rows = _rows(ready_config)
+    cells = [{"r_index": 5, "j1": 90}, {"r_index": 4, "j1": 80}]
+    first = _aligned(85.0, rows[4], 4, 90)
+    second = _aligned(90.0, rows[5], 5, yaw.place_j5(90, 5 + 3 - 3 + 0))
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [first, second], cells, 2, signals=9, align=True, offsets=[3, -3], continue_on_miss=True)
+    assert error is None, error
+    s1, s2 = [r for r in ledger.records() if r.get("event") == "start"]
+    assert (s1["r_l1"], s1["r_pick"], s1["offset"]) == (4, 7, 3) and s1["place_row"] == 5 + 3 and s1["place_at"] == {"r_index": 5, "j1": 90}
+    assert s1["pick_j5"] == int(round(yaw.j5_for(s1["plan"]["d_deg"], 85, 7)))  # 실제 집는 행으로 J5를 다시 계산했다
+    assert s1["place_j5"] == yaw.place_j5(90, 8)
+    assert tuple(arm.gate.joints(Pose(HOVER, 8, 90, s1["place_j5"]))) in [tuple(w[0]) for w in fake.writes]  # 놓는 손 행 = 공칭 + 오프셋
+    assert s2["offset"] == -3 and s2["r_pick"] == s2["r_l1"] - 3
+
+
+def test_chain_continue_on_miss_goes_on_after_empty_hand_failure(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
+    arm, fake, ledger, cam, error, table = _chain_run(
+        ready_config, tmp_path, [_measured(85.2, 140.0), _measured(85.2, 140.0)], cells, 2, grip_after=P1_GRIP_READ_MAX + 3, continue_on_miss=True)
+    assert error is None, error  # 첫 실패(빈 손)에서 멈추지 않고 두 번째 시도까지 한다
+    finished, _ = ledger.state()
+    assert [finished[t]["outcome"] for t in ("chain-001", "chain-002")] == ["failed", "failed"]
+    # 재시작 때도 빈 손 실패는 사람 확인을 요구하지 않는다
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [], cells, 0, ledger=ledger, continue_on_miss=True)
+    assert error is None
+
+
+def test_chain_continue_on_miss_still_stops_when_hand_holds_but_observer_fails(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 2, grip_after=148, observer_success=False, continue_on_miss=True)
+    assert isinstance(error, NeedHuman) and "실패" in str(error)  # 서보가 쥔 값인데 관찰기 실패 = 오판정 의심이라 멈춘다
+
+
+def _p1_aligned(ready_config, tmp_path, j5, confirm_file, name):
+    from learned_grasp.g0_runner import Outcome
+
+    table = generate(ready_config.table)
+    fake = _GripFake(148)
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    signal = tmp_path / "dabai_next"
+    ledger = AttemptLedger(tmp_path / "p1.jsonl")
+    cam = _Cam()
+    asked = []
+
+    def sleep(_):
+        if not signal.exists():
+            signal.write_text("1")
+
+    run_p1(arm, cam, lambda t: Outcome(True, "관찰기"), ledger, ready_config, table, {"trial_id": name, "r_index": 4, "j1": 80, "j5": j5}, signal, hold_s=0.0,
+           sleep=sleep, clock=lambda: 0.0, log=lambda line, **k: asked.append(line), confirm_dev_file=confirm_file, twist_photo=True)
+    return fake, cam, asked
+
+
+def test_p1_j5_confirmation_escalates_by_ten_degrees_and_takes_twist_photo(ready_config, tmp_path):
+    confirm = tmp_path / "j5_dev_confirmed"
+    results = {}
+    for name, j5 in (("p2-01", 85), ("p2-02", 90), ("p2-03", 80), ("p2-04", 70), ("p2-05", 100)):
+        fake, cam, asked = _p1_aligned(ready_config, tmp_path, j5, confirm, name)
+        results[name] = any("arrived" in line for line in asked)
+        assert cam.snaps == [name, f"{name}-putback"]  # 집기 전 사진과 도로 놓은 뒤 사진
+        assert any(w[0][4] == j5 for w in fake.writes)  # J5가 실제 쓰기 5번째 축으로 나간다
+    # 첫 시도(편차 5) 확인, 편차 0과 10(15 미만 증가)은 확인 없음, 편차 20(≥ 5+10)에서 다시 확인, 편차 10은 없음
+    assert results == {"p2-01": True, "p2-02": False, "p2-03": False, "p2-04": True, "p2-05": False}
