@@ -1040,3 +1040,38 @@ def test_chain_resumes_after_failure_only_with_acknowledgement(ready_config, tmp
     assert error is None
     start = [r for r in ledger.records() if r.get("event") == "start"][1]
     assert start["trial_id"] == "chain-002" and start["placed_at"] is None and start["same_cell"] is False  # 실패 뒤라 직전 놓은 자리를 모른다
+
+
+def _aligned(j1c, r_mm, r_index, j5):
+    from learned_grasp.l1 import L1Map, YawModel
+
+    l1, yaw = L1Map(), YawModel()
+    du, dv = l1.forward(j1c, r_mm, j5)
+    block = (l1.radial_angle_deg(j1c, r_mm) + yaw.hand_d(j5, round(j1c), r_index)) % 180.0
+    return {"du": float(du), "dv": float(dv), "block_angle_deg": float(block), "area": 2300, "board": [691.0, 291.0]}
+
+
+def test_chain_align_uses_j5_for_pick_and_place_and_confirms_j5_only_once(ready_config, tmp_path):
+    from learned_grasp.l1 import YawModel
+
+    yaw = YawModel()
+    table = generate(ready_config.table)
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
+    first = _aligned(85.0, table.entries[4].r_mm, 4, 72)
+    second = _aligned(100.0, table.entries[6].r_mm, 6, yaw.place_j5(100, 6))
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [first, second], cells, 2, signals=2, align=True)
+    assert error is None, error
+    starts = [r for r in ledger.records() if r.get("event") == "start"]
+    assert abs(starts[0]["pick_j5"] - 72) <= 1 and starts[0]["place_j5"] == yaw.place_j5(100, 6) and starts[0]["place_j5"] != 90
+    j5_written = {w[0][4] for w in fake.writes}
+    assert starts[0]["pick_j5"] in j5_written and starts[0]["place_j5"] in j5_written  # 5번째 축(J5)이 실제로 바뀌어 나갔다
+    finished, _ = ledger.state()
+    assert [finished[t]["outcome"] for t in ("chain-001", "chain-002")] == ["success", "success"]  # 신호 2개: 첫 집기와 첫 J5≠90 내려놓기
+
+
+def test_chain_align_rejects_block_that_needs_j5_outside_range(ready_config, tmp_path):
+    table = generate(ready_config.table)
+    m = _aligned(85.0, table.entries[4].r_mm, 4, 90)
+    m["block_angle_deg"] = (m["block_angle_deg"] + 50.0) % 180.0
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [m], [{"r_index": 6, "j1": 100}], 1, align=True)
+    assert isinstance(error, NeedHuman) and "J5 보정" in str(error) and fake.writes == []

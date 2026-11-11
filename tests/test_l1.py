@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from learned_grasp.config import load_config
-from learned_grasp.l1 import PSI_MAX_DEG, L1Map, block_from_image, plan
+from learned_grasp.l1 import PSI_MAX_DEG, L1Map, block_from_image, plan, plan_aligned
 from learned_grasp.pose_table import generate, table_for
 
 
@@ -61,3 +61,44 @@ def test_block_from_image_on_real_photo(l1):
         pytest.skip("사진 자료 없음(gitignore)")
     m = block_from_image(img)
     assert m is not None and 3 < m["du"] < 12 and -90 < m["dv"] < -75
+
+
+# --- J5 정렬 ---------------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def yaw():
+    from learned_grasp.l1 import YawModel
+
+    return YawModel()
+
+
+def _aligned_measurement(l1, yaw, j1, r_mm, r_index, j5, angle_error=0.0):
+    """J5로 손을 맞춘 자리에서 손과 같은 방향으로 놓인 블록의 측정값을 만든다."""
+    du, dv = l1.forward(j1, r_mm, j5)
+    block = (l1.radial_angle_deg(j1, r_mm) + yaw.hand_d(j5, j1, r_index) + angle_error) % 180.0
+    return {"du": float(du), "dv": float(dv), "block_angle_deg": float(block)}
+
+
+def test_aligned_plan_recovers_j5(l1, table, yaw):
+    for j1, r_idx, j5 in ((90, 4, 75), (100, 6, 105), (80, 3, 60), (95, 5, 90)):
+        r = table.entries[r_idx].r_mm
+        p = plan_aligned(_aligned_measurement(l1, yaw, j1, r, r_idx, j5), table, l1, yaw)
+        assert p.accept, p
+        assert abs(p.j5 - j5) <= 1 and p.j1 == j1 and p.r_index == r_idx
+        assert p.psi_deg < 1.0
+
+
+def test_aligned_plan_rejects_when_j5_would_leave_range(l1, table, yaw):
+    r = table.entries[4].r_mm
+    m = _aligned_measurement(l1, yaw, 90, r, 4, 90)
+    m["block_angle_deg"] = (m["block_angle_deg"] + 50.0) % 180.0  # 손이 닿을 수 없는 방향(J5 약 +45°)
+    p = plan_aligned(m, table, l1, yaw)
+    assert not p.accept and "J5 보정" in p.reason
+
+
+def test_place_j5_is_clamped_and_matches_model(yaw):
+    for j1, r_idx in ((104, 8), (75, 4), (90, 5)):
+        j5 = yaw.place_j5(j1, r_idx)
+        assert 60 <= j5 <= 120 and abs(yaw.hand_d(j5, j1, r_idx)) < 0.6
+    assert yaw.place_j5(104, 8) < 90  # 모델은 (8, 104)에서 손이 +8°라 J5를 줄인다
