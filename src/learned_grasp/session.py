@@ -534,6 +534,7 @@ def run_chain(
         raise SafetyViolation(f"중단·실패한 시도가 있어 사람 확인 전에는 진행하지 않는다(--ack): {stopped}")
     yaw = yaw or (YawModel() if align else None)
     l1_for_radial = L1Map()
+    ref_area = None
     confirmed_j5 = {"pick": False, "place": False}
     conf = {"hi": None, "lo": None, "off_pick": False, "off_place": False}  # 방향(J5>90, J5<90)별로 확인한 최대 편차
     n_rows = len(table.entries)
@@ -551,6 +552,14 @@ def run_chain(
         frame = tid if rejected_before == 0 else f"{tid}-r{rejected_before}"  # 거절된 사진을 덮어쓰지 않는다
         camera.snapshot(frame)  # 블록이 보드에 있고 팔은 park일 때의 사진
         measured = measure(camera.fetch(frame))
+        # 블록 모양 점검(일반 안전 점검): 손가락이 밀거나 세운 블록을 L1이 믿고 내려가지 않게 한다. 면적이 이 실행 첫 측정의 0.75~1.35배 밖이거나 긴 변/짧은 변이 1.6 미만이면 거절
+        if measured is not None and measured.get("area") is not None:
+            ref_area = ref_area or measured["area"]
+            ratio = measured["area"] / ref_area
+            aspect = measured.get("aspect")
+            if not (0.75 <= ratio <= 1.35) or (aspect is not None and aspect < 1.6):
+                ledger.note("rejected", trial_id=tid, reason=f"블록 모양이 이상하다(면적 비 {ratio:.2f}, 긴/짧은 변 {aspect if aspect is None else round(aspect, 2)}). 사람이 확인한다", accept=False)
+                raise NeedHuman(f"{tid}: 블록 모양이 이상해 시도하지 않는다(면적 비 {ratio:.2f}, 긴/짧은 변 {aspect if aspect is None else round(aspect, 2)}). 사람이 블록을 확인한다")
         planned = plan_aligned(measured, table, yaw=yaw, j5_clamp_margin=j5_clamp_margin) if align else plan(measured, table)
         if not planned.accept:
             ledger.note("rejected", trial_id=tid, **planned.asdict())
@@ -594,7 +603,8 @@ def run_chain(
         arm.goto(hover)
         ledger.start(trial, joints_grasp=arm.gate.joints(grasp), joints_hover=arm.gate.joints(hover), plan=planned.asdict(), place_at={"r_index": nxt["r_index"], "j1": nxt["j1"]}, placed_at=previous, same_cell=same_cell, pick_j5=pick_j5, place_j5=place_j5,
                      offset=delta_actual, r_l1=planned.r_index, r_pick=r_pick, place_row=place_row, human_placed=human_placed, clamped=planned.clamped if align else False,
-                     j1_offset=d1, j1_l1=planned.j1, lateral_mm=round(d1 * table.entries[r_pick].r_mm * math.pi / 180.0, 2))
+                     j1_offset=d1, j1_l1=planned.j1, lateral_mm=round(d1 * table.entries[r_pick].r_mm * math.pi / 180.0, 2),
+                     lateral_true_mm=round((j1_pick - planned.j1_cont) * table.entries[r_pick].r_mm * math.pi / 180.0, 2))
         need_j5 = align and not escalate and pick_j5 != 90 and not confirmed_j5["pick"]  # escalate(R1·X1)는 방향별 상승 규칙만 쓴다
         dev_pick = abs(pick_j5 - 90)
         side_pick = "hi" if pick_j5 > 90 else "lo"

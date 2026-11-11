@@ -129,7 +129,7 @@ def block_from_image(img: np.ndarray, board_ref=None) -> dict | None:
     center = np.array([m["m10"] / m["m00"] + x0, m["m01"] / m["m00"] + y0])
     (cx, cy), (w, h), ang = cv2.minAreaRect(hull)
     long_angle = ang if w >= h else ang + 90.0
-    return {"du": float(center[0] - board[0]), "dv": float(center[1] - board[1]), "block_angle_deg": float(long_angle % 180.0), "area": int(stats[i, cv2.CC_STAT_AREA]), "board": board.tolist()}
+    return {"du": float(center[0] - board[0]), "dv": float(center[1] - board[1]), "block_angle_deg": float(long_angle % 180.0), "area": int(stats[i, cv2.CC_STAT_AREA]), "aspect": float(max(w, h) / max(min(w, h), 1e-6)), "board": board.tolist()}
 
 
 def plan(measured: dict | None, table: PoseTable, l1: L1Map | None = None) -> Plan:

@@ -1314,3 +1314,65 @@ def test_chain_j1_offset_rejects_when_pick_j1_leaves_range(ready_config, tmp_pat
     edge = _aligned(109.0, rows[4], 4, 90)  # L1 J1 109에서 +2° → 111 범위 밖
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [edge], cells, 1, align=True, j1_offsets=[2])
     assert isinstance(error, NeedHuman) and "범위 밖" in str(error) and fake.writes == []
+
+
+def test_chain_confirms_every_j1_offset_pick_with_abs_at_least_two_and_only_first_of_each_side_for_one(ready_config, tmp_path):
+    from learned_grasp.g0_runner import Outcome
+    from learned_grasp.l1 import YawModel
+    from learned_grasp.session import run_chain
+
+    yaw = YawModel()
+    table = generate(ready_config.table)
+    rows = [e.r_mm for e in table.entries]
+    cells = [{"r_index": 5, "j1": 90}] * 4
+    fake = _GripFake(148)
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    signal = tmp_path / "dabai_next"
+    arrivals = []
+
+    def log(line, **k):
+        if "arrived" in line:
+            arrivals.append(json.loads(line)["arrived"])
+
+    def sleep(_):
+        if not signal.exists():
+            signal.write_text("1")
+
+    def run(offsets, folder):
+        folder.mkdir(exist_ok=True)
+        led = AttemptLedger(folder / "chain.jsonl")
+        queue = iter([_aligned(90.0, rows[5], 5, yaw.place_j5(90, 5))] * len(offsets))
+        arrivals.clear()
+        run_chain(arm, _ChainCam(), lambda t: Outcome(True, "관찰기"), led, ready_config, table, cells[: len(offsets)], len(offsets), signal, lambda path: next(queue),
+                  hold_s=0.0, sleep=sleep, clock=lambda: 0.0, log=log, align=True, escalate=True, continue_on_miss=True, j1_offsets=offsets, confirm_j1_abs_ge=2, rest_every=0)
+        return list(arrivals)
+
+    # Δ [0, 2, 2, -2]처럼 |Δ|≥2는 같은 방향이라도 매번 확인(첫 집기 포함 4가 아니라 Δ=0 첫 집기 1 + 2, 2, −2 = 4)
+    a = run([0, 2, 2, -2], tmp_path / "a")
+    assert a.count("descend") == 4, a
+    # Δ=1이 같은 방향에서 두 번이면 첫 번째만 확인(첫 집기는 Δ=1 자체가 첫 집기), Δ=−1은 그 방향 첫 번이라 확인
+    b = run([1, 1, -1], tmp_path / "b")
+    assert b.count("descend") == 2, b
+
+
+def test_chain_block_shape_gate_rejects_tipped_block(ready_config, tmp_path):
+    table = generate(ready_config.table)
+    rows = [e.r_mm for e in table.entries]
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
+    ok = dict(_aligned(85.0, rows[4], 4, 90), area=2400, aspect=2.0)
+    tipped = dict(_aligned(100.0, rows[6], 6, 90), area=3600, aspect=1.1)  # 끝으로 세워진 블록: 면적 커지고 정사각에 가까움
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [ok, tipped], cells, 2, signals=9, align=True)
+    assert isinstance(error, NeedHuman) and "모양이 이상" in str(error)
+    finished, _ = ledger.state()
+    assert finished["chain-001"]["outcome"] == "success"  # 첫 시도는 정상, 둘째는 쓰기 없이 멈춤
+
+
+def test_all_rejection_notes_survive_the_reason_keyword(ready_config, tmp_path):
+    # R1 반경 오프셋 J5 범위 밖 경로
+    table = generate(ready_config.table)
+    rows = [e.r_mm for e in table.entries]
+    cells = [{"r_index": 6, "j1": 100}]
+    m = _aligned(85.0, rows[4], 4, 90)
+    m["block_angle_deg"] = (m["block_angle_deg"] + 34.0) % 180.0  # L1 J5는 범위 안(약 117)이지만 +3행 오프셋에서 J5가 범위를 넘는 방향
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [m], cells, 1, align=True, offsets=[-3])
+    assert isinstance(error, NeedHuman)  # TypeError(reason 키워드 중복)가 아니라 NeedHuman이어야 한다
