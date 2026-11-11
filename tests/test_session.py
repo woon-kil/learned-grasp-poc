@@ -889,7 +889,7 @@ def _chain_run(ready_config, tmp_path, measures, cells, count, grip_after=148, o
 def test_chain_picks_at_l1_cell_and_places_at_next_cell(ready_config, tmp_path):
     cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0), _measured(99.8, 150.0)], cells, 2)
-    assert error is None and cam.snaps == ["chain-001", "chain-002"]
+    assert error is None and cam.snaps == ["chain-001", "chain-002", "chain-003"]  # 마지막은 놓은 블록 사진
     finished, _ = ledger.state()
     assert [finished[t]["outcome"] for t in ("chain-001", "chain-002")] == ["success", "success"]
     starts = [r for r in ledger.records() if r.get("event") == "start"]
@@ -953,7 +953,7 @@ def test_chain_keeps_rejected_photo_and_records_same_cell(ready_config, tmp_path
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0, psi_offset=12.0)], cells, 1)
     assert isinstance(error, NeedHuman) and cam.snaps == ["chain-001"]
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 1, ledger=ledger)
-    assert error is None and cam.snaps == ["chain-001-r1"]  # 거절된 사진 이름을 다시 쓰지 않는다
+    assert error is None and cam.snaps == ["chain-001-r1", "chain-002"]  # 거절된 사진 이름을 다시 쓰지 않는다
     start = [r for r in ledger.records() if r.get("event") == "start"][0]
     assert start["before_frame"] == "chain-001-r1" and start["same_cell"] is False
     # 두 번째 시도는 직전에 내려놓은 자리(6, 100)를 L1이 다시 고르면 같은 자리로 기록한다

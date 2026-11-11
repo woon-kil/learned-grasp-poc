@@ -573,6 +573,7 @@ def run_chain(
                     ledger.note("stop_requested", trial_id=tid, during="rest")
                     raise NeedHuman(f"{tid} 뒤 쉬는 중 정지 파일이 있어 멈춘다(팔 park, 쓰기 없음)")
                 sleep(1.0)
+    camera.snapshot(f"chain-{first + count:03d}")  # 마지막으로 놓은 블록의 방향도 잰다(쓰기 없음, 다음 시도의 입력 사진 이름)
 
 
 GRIP_MAX_WAIT_S = 300.0  # H2-A 실측: 사람이 자를 대고 읽고 손을 빼 답하는 데 약 211초
