@@ -29,7 +29,7 @@ def main() -> None:
     params.errorCorrectionRate = 1.0
     det = aruco.ArucoDetector(aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11), params)
     corners, ids, _ = det.detectMarkers(img[:, :, 2])
-    board = next(c.reshape(4, 2).mean(0) for c, i in zip(corners, ids.ravel()) if int(i) == 1)
+    board = next((c.reshape(4, 2).mean(0) for c, i in zip(corners, [] if ids is None else ids.ravel()) if int(i) == 1), np.array([691.25, 291.6]))  # 못 찾으면 빈 보드 사진의 위치
     cx, cy = board[0] + t["du"], board[1] + t["dv"]
     ang = math.radians(t["radial_angle_deg"])
     ux, uy = math.cos(ang), math.sin(ang)
