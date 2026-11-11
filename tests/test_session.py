@@ -849,7 +849,7 @@ def _measured(j1c, r_mm, psi_offset=0.0):
     return {"du": float(du), "dv": float(dv), "block_angle_deg": float(l1.radial_angle_deg(j1c, r_mm) % 180.0 + psi_offset), "area": 2300, "board": [691.0, 291.0]}
 
 
-def _chain_run(ready_config, tmp_path, measures, cells, count, grip_after=148, observer_success=True, signal_ok=True, ledger=None, signals=None):
+def _chain_run(ready_config, tmp_path, measures, cells, count, grip_after=148, observer_success=True, signal_ok=True, ledger=None, signals=None, **extra):
     from learned_grasp.g0_runner import Outcome
     from learned_grasp.session import run_chain
 
@@ -880,7 +880,7 @@ def _chain_run(ready_config, tmp_path, measures, cells, count, grip_after=148, o
     observer = lambda trial: Outcome(observer_success, "관찰기")
     error = None
     try:
-        run_chain(arm, cam, observer, ledger, ready_config, table, cells, count, signal, lambda path: next(queue), hold_s=0.0, **kwargs)
+        run_chain(arm, cam, observer, ledger, ready_config, table, cells, count, signal, lambda path: next(queue), hold_s=0.0, **kwargs, **extra)
     except (NeedHuman, SafetyViolation) as exc:
         error = exc
     return arm, fake, ledger, cam, error, table
@@ -939,7 +939,7 @@ def test_chain_refuses_when_cells_run_out(ready_config, tmp_path):
 
 def test_chain_place_descent_needs_confirmation_too(ready_config, tmp_path):
     cells = [{"r_index": 6, "j1": 100}]
-    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 1, signals=1)
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(85.2, 140.0)], cells, 1, signals=1, confirm_each=True)
     assert isinstance(error, NeedHuman) and "내려놓기 전 확인" in str(error)
     finished, _ = ledger.state()
     assert finished["chain-001"]["outcome"] == "interrupted" and finished["chain-001"]["picked"] is True
@@ -960,3 +960,39 @@ def test_chain_keeps_rejected_photo_and_records_same_cell(ready_config, tmp_path
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_measured(100.0, 149.6)], cells, 1, ledger=ledger)
     second = [r for r in ledger.records() if r.get("event") == "start"][1]
     assert second["placed_at"] == {"r_index": 6, "j1": 100} and second["same_cell"] is True, second
+
+
+def test_chain_default_confirms_only_the_first_pick(ready_config, tmp_path):
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}, {"r_index": 4, "j1": 90}]
+    arm, fake, ledger, cam, error, table = _chain_run(
+        ready_config, tmp_path, [_measured(85.2, 140.0), _measured(99.8, 150.0), _measured(76.1, 129.7)], cells, 3, signals=1)
+    assert error is None  # 신호 1개로 3시도가 끝난다: 첫 집기만 확인을 기다렸다
+    finished, _ = ledger.state()
+    assert [finished[t]["outcome"] for t in ("chain-001", "chain-002", "chain-003")] == ["success"] * 3
+
+
+def test_chain_rests_every_n_closes_without_writes(ready_config, tmp_path):
+    rests = []
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}, {"r_index": 4, "j1": 90}]
+    # 쉼은 sleep(rest_s)로 부른다. _chain_run의 sleep은 신호만 쓰므로 여기서 직접 구성한다.
+    from learned_grasp.g0_runner import Outcome
+    from learned_grasp.session import run_chain
+
+    table = generate(ready_config.table)
+    fake = _GripFake(148)
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    signal = tmp_path / "dabai_next"
+    queue = iter([_measured(85.2, 140.0), _measured(99.8, 150.0), _measured(76.1, 129.7)])
+    writes_at_rest = []
+
+    def sleep(seconds):
+        if seconds == 123.0:
+            rests.append(seconds)
+            writes_at_rest.append(len(fake.writes))
+        elif not signal.exists():
+            signal.write_text("1")
+
+    run_chain(arm, _ChainCam(), lambda t: Outcome(True, "관찰기"), AttemptLedger(tmp_path / "chain.jsonl"), ready_config, table, cells, 3, signal,
+              lambda path: next(queue), hold_s=0.0, sleep=sleep, clock=lambda: 0.0, log=lambda *a, **k: None, rest_every=2, rest_s=123.0)
+    assert rests == [123.0]  # 2번째 닫기 뒤 한 번만(마지막 시도 뒤에는 쉬지 않는다)
+    assert writes_at_rest and writes_at_rest[0] == len(fake.writes) - 10  # 쉬는 동안 쓰기 없음, 그 뒤 3번째 시도 10회

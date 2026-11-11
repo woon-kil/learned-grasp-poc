@@ -469,10 +469,13 @@ def run_chain(
     sleep=None,
     clock=None,
     log=print,
+    confirm_each: bool = False,
+    rest_every: int = 10,
+    rest_s: float = 300.0,
 ) -> None:
     """연쇄 종단 시험. park 사진 → L1이 고른 자리에서 집기 → park → 목록의 다음 자리에 내려놓기를 count번 이어 간다.
 
-    사람은 시작 때 블록을 놓고 매 하강 전 확인 신호(signal)를 보낸다. 다음 시도의 입력 사진은 직전 내려놓기 뒤의 park 사진이다.
+    사람은 시작 때 블록을 놓고, **이 실행의 첫 집기 하강 전에만** 확인 신호(signal)를 보낸다(사용자 결정 2026-11-11: 그 뒤는 전원 차단으로 감독). confirm_each면 집기·내려놓기마다 받는다. 닫기 rest_every번마다 rest_s초 쉰다(그리퍼 쉼, 쓰기 없음). 다음 시도의 입력 사진은 직전 내려놓기 뒤의 park 사진이다.
     성공 = P1과 같다(관찰기 그리고 서보 6 판독). L1이 거절(검출 실패, 구역·방향 밖)하거나 시도가 실패하거나 확인 신호가 없으면
     쓰기 없이(실패면 P1처럼 같은 자리에 도로 놓고) 멈춘다. 자동 복구 이동은 없다. cells[k-1]이 k번째 시도의 내려놓을 자리다.
     """
@@ -508,12 +511,13 @@ def run_chain(
             arm.goto(PARK_POSE)
         arm.goto(hover)
         ledger.start(trial, joints_grasp=arm.gate.joints(grasp), joints_hover=arm.gate.joints(hover), plan=planned.asdict(), place_at={"r_index": nxt["r_index"], "j1": nxt["j1"]}, placed_at=previous, same_cell=same_cell)
-        try:
-            _wait_dabai_signal(signal, "descend", wait_s, sleep, clock, log)
-        except NeedHuman:
-            arm.goto(PARK_POSE)
-            ledger.finish(tid, outcome="interrupted", success=False, reason="하강 전 확인을 받지 못했다")
-            raise
+        if confirm_each or k == first:
+            try:
+                _wait_dabai_signal(signal, "descend", wait_s, sleep, clock, log)
+            except NeedHuman:
+                arm.goto(PARK_POSE)
+                ledger.finish(tid, outcome="interrupted", success=False, reason="하강 전 확인을 받지 못했다")
+                raise
         arm.goto(grasp)
         arm.set_grip("close")
         arm.goto(hover)
@@ -528,7 +532,7 @@ def run_chain(
         reason = f"{outcome.reason}, 서보 6 판독 {grip}" + ("" if holds else f" > {P1_GRIP_READ_MAX}(빈 손으로 봄)")
         target = (hover, grasp) if not success else (Pose(HOVER, nxt["r_index"], nxt["j1"], 90), Pose(GRASP, nxt["r_index"], nxt["j1"], 90))
         arm.goto(target[0])
-        if success:  # 블록을 쥔 채 내려놓는 하강도 사용자 확인을 받는다. 없으면 블록을 쥔 채 park로 돌아가 멈춘다
+        if success and confirm_each:  # 내려놓는 하강 확인(선택). 없으면 블록을 쥔 채 park로 돌아가 멈춘다
             try:
                 _wait_dabai_signal(signal, "place", wait_s, sleep, clock, log)
             except NeedHuman as exc:
@@ -542,6 +546,9 @@ def run_chain(
         ledger.finish(tid, outcome="success" if success else "failed", success=success, reason=reason, read_at_park=read_at_park, grip_read=grip)
         if not success:
             raise NeedHuman(f"{tid} 실패({reason}). 같은 자리에 도로 놓고 멈춘다. 사람이 확인한다")
+        if rest_every > 0 and k % rest_every == 0 and k < first + count - 1:
+            log(json.dumps({"rest_s": rest_s, "after": tid}, ensure_ascii=False), flush=True)
+            sleep(rest_s)
 
 
 GRIP_MAX_WAIT_S = 300.0  # H2-A 실측: 사람이 자를 대고 읽고 손을 빼 답하는 데 약 211초
@@ -754,6 +761,9 @@ def main() -> None:
     parser.add_argument("--cells", type=Path, help="chain: 내려놓을 자리 목록 JSON(scripts/chain_cells.py)")
     parser.add_argument("--count", type=int, help="chain: 이번 실행의 시도 수")
     parser.add_argument("--board-ref", help="chain: 보드 마커 id 1이 안 보일 때 쓸 중심 'x,y'(최근 빈 보드 사진)")
+    parser.add_argument("--confirm-each", action="store_true", help="chain: 집기·내려놓기마다 하강 전 확인(기본은 이 실행의 첫 집기만)")
+    parser.add_argument("--rest-every", type=int, default=10, help="chain: 닫기 N번마다 쉰다(0이면 쉬지 않음)")
+    parser.add_argument("--rest-sec", type=float, default=300.0, help="chain: 쉬는 시간(초)")
     parser.add_argument("--hover-only", action="store_true", help="dabai-view: hover에서 신호 뒤 grasp 없이 park로 돌아온다")
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
@@ -864,7 +874,8 @@ def main() -> None:
             camera = P620Camera(f"runs/{approval.session_id}/frames")
             try:
                 run_chain(arm, camera, make_pick_observer(camera), AttemptLedger(folder / "chain.jsonl"), config, table, cells, args.count,
-                          folder / "dabai_next", measure, min(args.hold_sec or 5.0, 60.0))
+                          folder / "dabai_next", measure, min(args.hold_sec or 5.0, 60.0),
+                          confirm_each=args.confirm_each, rest_every=args.rest_every, rest_s=args.rest_sec)
             finally:
                 camera.close()
         elif args.command == "grip-max":
