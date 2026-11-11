@@ -1360,7 +1360,7 @@ def test_chain_block_shape_gate_rejects_tipped_block(ready_config, tmp_path):
     rows = [e.r_mm for e in table.entries]
     cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
     ok = dict(_aligned(85.0, rows[4], 4, 90), area=2400, aspect=2.0)
-    tipped = dict(_aligned(100.0, rows[6], 6, 90), area=3600, aspect=1.1)  # 끝으로 세워진 블록: 면적 커지고 정사각에 가까움
+    tipped = dict(_aligned(100.0, rows[6], 6, 90), area=4200, aspect=1.1)  # 끝으로 세워진 블록: 면적이 크고 정사각에 가까움
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [ok, tipped], cells, 2, signals=9, align=True)
     assert isinstance(error, NeedHuman) and "모양이 이상" in str(error)
     finished, _ = ledger.state()
@@ -1376,3 +1376,13 @@ def test_all_rejection_notes_survive_the_reason_keyword(ready_config, tmp_path):
     m["block_angle_deg"] = (m["block_angle_deg"] + 34.0) % 180.0  # L1 J5는 범위 안(약 117)이지만 +3행 오프셋에서 J5가 범위를 넘는 방향
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [m], cells, 1, align=True, offsets=[-3])
     assert isinstance(error, NeedHuman)  # TypeError(reason 키워드 중복)가 아니라 NeedHuman이어야 한다
+
+
+def test_chain_shape_gate_accepts_natural_area_variation(ready_config, tmp_path):
+    table = generate(ready_config.table)
+    rows = [e.r_mm for e in table.entries]
+    cells = [{"r_index": 6, "j1": 100}, {"r_index": 2, "j1": 76}]
+    small = dict(_aligned(85.0, rows[4], 4, 90), area=1888, aspect=2.3)  # X2-1 첫 측정
+    large = dict(_aligned(100.0, rows[6], 6, 90), area=2986, aspect=1.75)  # X2-1 둘째: 같은 블록의 자연 변동(비 1.58)
+    arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [small, large], cells, 2, signals=9, align=True)
+    assert error is None, error

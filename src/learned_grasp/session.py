@@ -387,6 +387,8 @@ def run_dabai_view(
     arm.goto(PARK_POSE)
 
 
+SHAPE_AREA = (1500, 3800)  # 블록 모양 점검: 놓인 블록 사진 184장 면적 1872~3207에 여유
+SHAPE_ASPECT_MIN = 1.4  # 같은 사진 긴/짧은 변 최소 1.47
 P1_GRIP_READ_MAX = 151  # 블록을 쥐면 서보 6 판독 148~149(G0b-4), 빈 손 SDK 155에서 154(H2-C). 이보다 크면 빈 손으로 본다
 
 
@@ -534,7 +536,6 @@ def run_chain(
         raise SafetyViolation(f"중단·실패한 시도가 있어 사람 확인 전에는 진행하지 않는다(--ack): {stopped}")
     yaw = yaw or (YawModel() if align else None)
     l1_for_radial = L1Map()
-    ref_area = None
     confirmed_j5 = {"pick": False, "place": False}
     conf = {"hi": None, "lo": None, "off_pick": False, "off_place": False}  # 방향(J5>90, J5<90)별로 확인한 최대 편차
     n_rows = len(table.entries)
@@ -552,14 +553,13 @@ def run_chain(
         frame = tid if rejected_before == 0 else f"{tid}-r{rejected_before}"  # 거절된 사진을 덮어쓰지 않는다
         camera.snapshot(frame)  # 블록이 보드에 있고 팔은 park일 때의 사진
         measured = measure(camera.fetch(frame))
-        # 블록 모양 점검(일반 안전 점검): 손가락이 밀거나 세운 블록을 L1이 믿고 내려가지 않게 한다. 면적이 이 실행 첫 측정의 0.75~1.35배 밖이거나 긴 변/짧은 변이 1.6 미만이면 거절
+        # 블록 모양 점검(일반 안전 점검): 손가락이 밀거나 세운 블록을 L1이 믿고 내려가지 않게 한다. 한계는 저장된 놓인 블록 사진 184장의 분포(면적 1872~3207, 긴/짧은 변 1.47~2.44)에
+        # 여유를 둔 절대 값이다: 면적 1500~3800 밖이거나 긴/짧은 변이 1.4 미만이면 쓰기 없이 멈춘다(첫 측정 대비 비율은 자연 변동 1.6배를 막아 쓰지 않는다).
         if measured is not None and measured.get("area") is not None:
-            ref_area = ref_area or measured["area"]
-            ratio = measured["area"] / ref_area
             aspect = measured.get("aspect")
-            if not (0.75 <= ratio <= 1.35) or (aspect is not None and aspect < 1.6):
-                ledger.note("rejected", trial_id=tid, reason=f"블록 모양이 이상하다(면적 비 {ratio:.2f}, 긴/짧은 변 {aspect if aspect is None else round(aspect, 2)}). 사람이 확인한다", accept=False)
-                raise NeedHuman(f"{tid}: 블록 모양이 이상해 시도하지 않는다(면적 비 {ratio:.2f}, 긴/짧은 변 {aspect if aspect is None else round(aspect, 2)}). 사람이 블록을 확인한다")
+            if not (SHAPE_AREA[0] <= measured["area"] <= SHAPE_AREA[1]) or (aspect is not None and aspect < SHAPE_ASPECT_MIN):
+                ledger.note("rejected", trial_id=tid, reason=f"블록 모양이 이상하다(면적 {measured['area']}, 긴/짧은 변 {aspect if aspect is None else round(aspect, 2)}). 사람이 확인한다", accept=False)
+                raise NeedHuman(f"{tid}: 블록 모양이 이상해 시도하지 않는다(면적 {measured['area']}, 긴/짧은 변 {aspect if aspect is None else round(aspect, 2)}). 사람이 블록을 확인한다")
         planned = plan_aligned(measured, table, yaw=yaw, j5_clamp_margin=j5_clamp_margin) if align else plan(measured, table)
         if not planned.accept:
             ledger.note("rejected", trial_id=tid, **planned.asdict())
