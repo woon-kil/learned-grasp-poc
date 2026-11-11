@@ -1399,3 +1399,29 @@ def test_chain_hover_photo_is_taken_before_descent(ready_config, tmp_path):
     table = generate(ready_config.table)
     arm, fake, ledger, cam, error, table = _chain_run(ready_config, tmp_path, [_aligned(85.0, table.entries[4].r_mm, 4, 90)], cells, 1, align=True, hover_photo=True)
     assert error is None and "chain-001-hover" in cam.snaps and cam.snaps.index("chain-001-hover") > cam.snaps.index("chain-001")
+
+
+def test_hover_sweep_visits_only_hover_poses_via_park_and_never_grasps(ready_config, tmp_path):
+    from learned_grasp.session import hover_sweep_poses, run_hover_sweep
+
+    table = generate(ready_config.table)
+    gate = SafetyGate(ready_config, table)
+    fake = _GripFake(148)
+    arm = SafeArm(fake, gate, sleep=lambda _: None)
+    signal = tmp_path / "dabai_next"
+    arrivals = []
+
+    def sleep(_):
+        if not signal.exists():
+            signal.write_text("1")
+
+    cam = _ChainCam()
+    run_hover_sweep(arm, cam, signal, 5, 90, sleep=sleep, clock=lambda: 0.0, log=lambda line, **k: arrivals.append(line))
+    poses = hover_sweep_poses(5, 90)
+    assert len(poses) == 14 and all(p.kind == HOVER for _, p in poses)  # grasp 자세가 없다
+    assert [n for n in cam.snaps] == [f"sweep-{n}" for n, _ in poses]
+    grasp_joints = {tuple(gate.joints(Pose(GRASP, 5, j1, j5))) for j1 in range(70, 111) for j5 in range(60, 121)}
+    assert not any(tuple(w[0]) in grasp_joints for w in fake.writes)
+    assert len(fake.writes) == 1 + 2 * 14  # 처음 park + 자세마다 hover·park
+    assert all(w[1] == ready_config.open_sdk for w in fake.writes)  # 손은 열린 채
+    assert arm.pose == PARK_POSE

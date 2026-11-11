@@ -387,6 +387,39 @@ def run_dabai_view(
     arm.goto(PARK_POSE)
 
 
+HOVER_SWEEP_J5 = (60, 70, 80, 90, 100, 110, 120)
+HOVER_SWEEP_J1_DELTA = (-10, -5, 5, 10)
+
+
+def hover_sweep_poses(r_index: int, j1: int) -> list[tuple[str, Pose]]:
+    """hover만 도는 자세 목록(H4 손끝 검출 점검). J5 7단계(J1 고정), J1 4단계(J5 90), 기준 자세 재방문 3번. grasp 자세는 없다."""
+    poses = [(f"j5-{j5}", Pose(HOVER, r_index, j1, j5)) for j5 in HOVER_SWEEP_J5]
+    poses += [(f"j1{d:+d}", Pose(HOVER, r_index, j1 + d, 90)) for d in HOVER_SWEEP_J1_DELTA]
+    poses += [(f"ref-{i}", Pose(HOVER, r_index, j1, 90)) for i in (1, 2, 3)]
+    return poses
+
+
+def run_hover_sweep(arm: SafeArm, camera, signal: Path, r_index: int, j1: int, wait_s: float = 300.0, sleep=None, clock=None, log=print) -> None:
+    """park→hover→(사진)→park를 자세마다 반복한다. 열린 손, 닫지 않음, grasp 없음. 시작 전에 한 번 확인 신호를 기다린다.
+
+    hover↔hover는 게이트가 허용하지 않아 자세마다 park를 거친다. 사진 이름은 `sweep-<자세 이름>`이고 쓰기 없이 찍는다.
+    """
+    import time as _time
+
+    sleep = sleep or _time.sleep
+    clock = clock or _time.monotonic
+    poses = hover_sweep_poses(r_index, j1)
+    for name, pose in poses:  # 쓰기 전에 모든 자세를 게이트로 검사한다
+        arm.gate.joints(pose)
+    arm.goto(PARK_POSE)
+    _wait_dabai_signal(signal, "sweep", wait_s, sleep, clock, log)
+    for name, pose in poses:
+        arm.goto(pose)
+        camera.snapshot(f"sweep-{name}")
+        arm.goto(PARK_POSE)
+        log(json.dumps({"sweep": name, "j1": pose.j1, "j5": pose.j5}, ensure_ascii=False), flush=True)
+
+
 SHAPE_AREA = (1500, 3800)  # 블록 모양 점검: 놓인 블록 사진 184장 면적 1872~3207에 여유
 SHAPE_ASPECT_MIN = 1.4  # 같은 사진 긴/짧은 변 최소 1.47
 P1_GRIP_READ_MAX = 151  # 블록을 쥐면 서보 6 판독 148~149(G0b-4), 빈 손 SDK 155에서 154(H2-C). 이보다 크면 빈 손으로 본다
@@ -921,7 +954,7 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", "chain", "release-here", *G0D_COMMANDS, "answer"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", "chain", "release-here", "hover-sweep", *G0D_COMMANDS, "answer"])
     parser.add_argument("--spread", type=Path)
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--r-index", type=int)
@@ -956,7 +989,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.hover_only and args.command != "dabai-view":
         raise SystemExit("--hover-only는 dabai-view에서만 쓴다")
-    if args.j1 is not None and args.command not in ("dabai-view", "p1-pick", "release-here"):
+    if args.j1 is not None and args.command not in ("dabai-view", "p1-pick", "release-here", "hover-sweep"):
         raise SystemExit("--j1은 dabai-view, p1-pick, release-here에서만 쓴다")
     if args.command == "answer":
         # 실행 중인 세션 옆 터미널에서 쓴다. 잠금과 드라이버를 잡지 않는다.
@@ -986,6 +1019,8 @@ def main() -> None:
         return
     if args.command == "p1-pick" and (args.r_index is None or args.j1 is None or args.trial is None):
         raise SystemExit("p1-pick은 --r-index, --j1, --trial이 필요하다")
+    if args.command == "hover-sweep" and (args.r_index is None or args.j1 is None):
+        raise SystemExit("hover-sweep은 --r-index와 --j1이 필요하다")
     if args.command == "release-here" and (args.r_index is None or args.j1 is None or args.j5 is None):
         raise SystemExit("release-here는 --r-index, --j1, --j5가 필요하다")
     if args.command == "chain" and ((args.cells is None and args.r1 is None and args.x1 is None and args.x2 is None) or args.count is None or args.count < 1):
@@ -994,13 +1029,13 @@ def main() -> None:
         if args.z_offset != 15 or args.r_index is None:
             raise SystemExit("grip-max는 --z-offset 15와 --r-index가 필요하다")
     if args.r_index is not None:
-        if args.command not in ("close-check", "dabai-view", "grip-max", "p1-pick", "release-here"):
+        if args.command not in ("close-check", "dabai-view", "grip-max", "p1-pick", "release-here", "hover-sweep"):
             raise SystemExit("--r-index는 close-check, dabai-view, grip-max, p1-pick, release-here에서만 쓴다")
         if args.command in ("close-check", "grip-max"):
             require_site_folder(folder, args.r_index)
     if args.command == "carry-test" and args.attempt is None:
         raise SystemExit("--attempt가 필요하다")
-    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", "chain", "release-here", *G0D_COMMANDS) and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", "chain", "release-here", "hover-sweep", *G0D_COMMANDS) and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command in ("ladder", "close-check", "grip-max"):
         require_previous_observation(folder, args.z_offset)
@@ -1039,6 +1074,12 @@ def main() -> None:
                 run_p1(arm, camera, make_pick_observer(camera), AttemptLedger(folder / "p1.jsonl"), config, table,
                        {"trial_id": args.trial, "r_index": args.r_index, "j1": args.j1, "j5": args.j5 if p2 else 90}, folder / "dabai_next", min(args.hold_sec or 5.0, 60.0),
                        confirm_dev_file=folder / "j5_dev_confirmed" if p2 else None, twist_photo=p2)
+            finally:
+                camera.close()
+        elif args.command == "hover-sweep":
+            camera = P620Camera(f"runs/{approval.session_id}/frames")
+            try:
+                run_hover_sweep(arm, camera, folder / "dabai_next", args.r_index, args.j1)
             finally:
                 camera.close()
         elif args.command == "release-here":
