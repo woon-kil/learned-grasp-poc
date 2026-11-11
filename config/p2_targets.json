@@ -127,14 +127,14 @@
   {
    "id": "p2-11",
    "j1": 82.69,
-   "r_mm": 129.87,
-   "r_index": 2,
+   "r_mm": 144.87,
+   "r_index": 5,
    "target_j5": 111.0,
-   "target_d_deg": 22.0,
-   "radial_angle_deg": 97.4,
-   "block_angle_deg": 119.4,
-   "du": -8.2,
-   "dv": -73.5
+   "target_d_deg": 25.6,
+   "radial_angle_deg": 93.1,
+   "block_angle_deg": 118.7,
+   "du": -9.7,
+   "dv": -58.0
   },
   {
    "id": "p2-12",
@@ -174,15 +174,15 @@
   },
   {
    "id": "p2-15",
-   "j1": 107.71,
+   "j1": 102.0,
    "r_mm": 142.9,
    "r_index": 5,
    "target_j5": 77.8,
-   "target_d_deg": -8.3,
-   "radial_angle_deg": 62.8,
-   "block_angle_deg": 54.5,
-   "du": 57.0,
-   "dv": -58.6
+   "target_d_deg": -8.9,
+   "radial_angle_deg": 69.0,
+   "block_angle_deg": 60.1,
+   "du": 41.2,
+   "dv": -56.3
   },
   {
    "id": "p2-16",
@@ -193,44 +193,44 @@
    "target_d_deg": 12.4,
    "radial_angle_deg": 74.8,
    "block_angle_deg": 87.2,
-   "du": 29.3,
+   "du": 29.2,
    "dv": -57.7
   },
   {
    "id": "p2-17",
    "j1": 87.99,
-   "r_mm": 153.78,
-   "r_index": 7,
+   "r_mm": 142.78,
+   "r_index": 5,
    "target_j5": 80.6,
-   "target_d_deg": -4.9,
-   "radial_angle_deg": 83.5,
-   "block_angle_deg": 78.6,
-   "du": 3.8,
-   "dv": -44.4
+   "target_d_deg": -7.4,
+   "radial_angle_deg": 86.6,
+   "block_angle_deg": 79.2,
+   "du": 2.78,
+   "dv": -55.89
   },
   {
    "id": "p2-18",
-   "j1": 104.76,
+   "j1": 102.0,
    "r_mm": 157.12,
    "r_index": 8,
    "target_j5": 68.7,
-   "target_d_deg": -15.0,
-   "radial_angle_deg": 62.8,
-   "block_angle_deg": 47.8,
-   "du": 55.4,
-   "dv": -41.3
+   "target_d_deg": -15.3,
+   "radial_angle_deg": 65.7,
+   "block_angle_deg": 50.4,
+   "du": 46.9,
+   "dv": -40.4
   },
   {
    "id": "p2-19",
    "j1": 96.0,
-   "r_mm": 131.83,
-   "r_index": 2,
+   "r_mm": 138.83,
+   "r_index": 4,
    "target_j5": 67.9,
-   "target_d_deg": -24.1,
-   "radial_angle_deg": 79.1,
-   "block_angle_deg": 54.9,
-   "du": 21.4,
-   "dv": -65.8
+   "target_d_deg": -21.7,
+   "radial_angle_deg": 77.2,
+   "block_angle_deg": 55.5,
+   "du": 22.9,
+   "dv": -58.5
   },
   {
    "id": "p2-20",
@@ -243,6 +243,20 @@
    "block_angle_deg": 70.6,
    "du": 41.0,
    "dv": -45.7
+  },
+  {
+   "id": "p2-21",
+   "j1": 90.0,
+   "r_mm": 148.0,
+   "r_index": 6,
+   "target_j5": 69.0,
+   "target_d_deg": -18.7,
+   "radial_angle_deg": 82.5,
+   "block_angle_deg": 63.7,
+   "du": 8.1,
+   "dv": -49.1,
+   "note": "p2-11 대체(2번 거절: 위치 범위 밖, J5 121 > 120). 사전 시드 밖 보충 자리"
   }
- ]
+ ],
+ "note": "p2-15 이후 목표는 받침대 겹침을 피하도록 r를 바깥으로 옮김(scripts/p2_targets_clear.py): [('p2-15', 142.9, 142.9), ('p2-16', 142.22, 142.2), ('p2-17', 153.78, 153.8), ('p2-18', 157.12, 157.1), ('p2-19', 138.83, 138.8), ('p2-20', 153.12, 153.1), ('p2-21', 148.0, 148.0)] | p2-17은 보드 마커와 겹쳐 r를 안쪽으로 옮김(scripts/p2_svg_check.py)"
 }
