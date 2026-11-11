@@ -21,6 +21,8 @@ from learned_grasp.session import (
     descend_and_stop,
     run_dabai_view,
     run_grip_max,
+    run_p1,
+    P1_GRIP_READ_MAX,
     fit_config,
     run_fit,
     run_carry_test,
@@ -739,4 +741,92 @@ def test_dabai_view_cli_rejects_j1_on_other_commands(monkeypatch, tmp_path):
     monkeypatch.setattr("sys.argv", ["session", "read", "--session", str(tmp_path / "approval.json"), "--j1", "70"])
     with pytest.raises(SystemExit) as info:
         session.main()
-    assert "--j1은 dabai-view에서만" in str(info.value)
+    assert "--j1은 dabai-view와 p1-pick에서만" in str(info.value)
+
+
+# --- p1-pick: 사람이 놓은 블록을 L1이 정한 자세에서 집는 시도 ----------------------------------------
+
+
+class _Cam:
+    def __init__(self):
+        self.snaps = []
+
+    def snapshot(self, name):
+        self.snaps.append(name)
+
+
+class _GripFake(FakeArm):
+    """close 뒤 서보 6 판독을 grip_after로 돌려주는 가짜 드라이버."""
+
+    def __init__(self, grip_after):
+        super().__init__()
+        self.grip_after = grip_after
+
+    def read(self):
+        reading = super().read()
+        values = reading.get("values")
+        if values and len(values) > 5 and values[5] > 100:
+            values[5] = self.grip_after
+        return reading
+
+
+def _p1_run(ready_config, tmp_path, grip_after=148, observer_success=True, signal_ok=True, r_index=4, j1=80):
+    from learned_grasp.g0_runner import Outcome
+
+    table = generate(ready_config.table)
+    fake = _GripFake(grip_after)
+    arm = SafeArm(fake, SafetyGate(ready_config, table), sleep=lambda _: None)
+    signal = tmp_path / "dabai_next"
+    ledger = AttemptLedger(tmp_path / "p1.jsonl")
+    cam = _Cam()
+    lines = []
+
+    def sleep(_):
+        if signal_ok and not signal.exists():
+            signal.write_text("1")
+
+    ticks = iter([0.0, 0.0, 400.0])
+    kwargs = dict(sleep=sleep, clock=lambda: 0.0 if signal_ok else next(ticks), log=lambda line, **k: lines.append(line))
+    observer = lambda trial: Outcome(observer_success, "관찰기")
+    try:
+        run_p1(arm, cam, observer, ledger, ready_config, table, {"trial_id": "p1-01", "r_index": r_index, "j1": j1, "j5": 90}, signal, hold_s=0.0, **kwargs)
+        error = None
+    except NeedHuman as exc:
+        error = exc
+    return arm, fake, ledger, cam, error
+
+
+def test_p1_success_requires_observer_and_servo_reading(ready_config, tmp_path):
+    arm, fake, ledger, cam, error = _p1_run(ready_config, tmp_path, grip_after=P1_GRIP_READ_MAX - 3)
+    assert error is None and cam.snaps == ["p1-01"]
+    # park, hover | grasp, 닫기, hover, park | hover, grasp, 열기, hover, park
+    assert len(fake.writes) == 11 and arm.pose == PARK_POSE and not arm.holding
+    finish = [r for r in ledger.records() if r["event"] == "finish"][-1]
+    assert finish["success"] is True and finish["outcome"] == "success"
+    assert {w[0][0] for w in fake.writes if w[0] != tuple(ready_config.park)} == {80}  # J1 80에서 hover·grasp
+
+
+def test_p1_fails_when_servo_reads_empty_hand_even_if_observer_passes(ready_config, tmp_path):
+    arm, fake, ledger, cam, error = _p1_run(ready_config, tmp_path, grip_after=P1_GRIP_READ_MAX + 3)
+    finish = [r for r in ledger.records() if r["event"] == "finish"][-1]
+    assert finish["success"] is False and "빈 손" in finish["reason"]
+
+
+def test_p1_fails_when_observer_fails(ready_config, tmp_path):
+    arm, fake, ledger, cam, error = _p1_run(ready_config, tmp_path, observer_success=False)
+    finish = [r for r in ledger.records() if r["event"] == "finish"][-1]
+    assert finish["success"] is False and finish["outcome"] == "failed"
+
+
+def test_p1_does_not_descend_without_confirmation(ready_config, tmp_path):
+    arm, fake, ledger, cam, error = _p1_run(ready_config, tmp_path, signal_ok=False)
+    assert isinstance(error, NeedHuman)
+    assert len(fake.writes) == 3 and arm.pose == PARK_POSE  # park, hover, 복귀 park. grasp 없음, 닫지 않음
+    finish = [r for r in ledger.records() if r["event"] == "finish"][-1]
+    assert finish["outcome"] == "interrupted"
+
+
+def test_p1_refuses_repeated_trial_id(ready_config, tmp_path):
+    _p1_run(ready_config, tmp_path)
+    with pytest.raises(SafetyViolation):
+        _p1_run(ready_config, tmp_path)

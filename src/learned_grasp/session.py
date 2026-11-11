@@ -11,6 +11,7 @@
   python -m learned_grasp.session tolerance --session runs/G0d-1/approval.json --sheet results/G0d/sheet.json --spread runs/G0d-0/spread.json --start-confirmed
   python -m learned_grasp.session answer  --session runs/G0d-0/approval.json   (다른 터미널, 실행 중 질문에 답한다)
   python -m learned_grasp.session dabai-view --session runs/DB-1/approval.json --start-confirmed [--r-index N] [--j1 J] [--hover-only]   (도착 줄마다 촬영 뒤 `touch runs/DB-1/dabai_next`)
+  python -m learned_grasp.session p1-pick --session runs/P1/approval.json --r-index R --j1 J --trial p1-NN --start-confirmed   (hover에서 멈춤, 하강 확인 뒤 `touch runs/P1/dabai_next`)
   python -m learned_grasp.session grip-max --session runs/H2-C-r4/approval.json --z-offset 15 --r-index 4 --max-sdk 180 --start-confirmed   (단계마다 읽은 뒤 `touch runs/H2-C-r4/dabai_next`, 중지는 `touch runs/H2-C-r4/grip_stop`)
 
 대화형 입력이 없다. 감독자는 전원 차단으로 멈춘다. --start-confirmed는 사용자가 빈 그리퍼, 시작 자세,
@@ -383,6 +384,73 @@ def run_dabai_view(
     arm.goto(PARK_POSE)
 
 
+P1_GRIP_READ_MAX = 151  # 블록을 쥐면 서보 6 판독 148~149(G0b-4), 빈 손 SDK 155에서 154(H2-C). 이보다 크면 빈 손으로 본다
+
+
+def run_p1(
+    arm: SafeArm,
+    camera,
+    observer,
+    ledger: AttemptLedger,
+    config: Config,
+    table: PoseTable,
+    trial: dict,
+    signal: Path,
+    hold_s: float = 5.0,
+    wait_s: float = 300.0,
+    sleep=None,
+    clock=None,
+    log=print,
+) -> None:
+    """사람이 놓은 블록을 L1이 정한 (r_index, J1, J5 90)에서 집어 park까지 들고 갔다가 같은 자리에 내려놓는다.
+
+    시작 전 사진을 찍고 hover에서 멈춰 하강 전 확인 신호(signal)를 기다린다. 성공 = 집기 관찰기(변화·노란 화소)와
+    서보 6 판독(P1_GRIP_READ_MAX 이하)이 모두 참이다. 재시도는 없다. 확인 신호가 없으면 park로 돌아가고 시도는 중단으로 끝난다.
+    """
+    import time as _time
+
+    sleep = sleep or _time.sleep
+    clock = clock or _time.monotonic
+    ledger.bind(config_version=config.config_version, table_sha256=table.sha256())
+    ledger.close_interrupted()
+    finished, _ = ledger.state()
+    stopped = sorted(trial_id for trial_id, record in finished.items() if record.get("outcome") == "interrupted")
+    if stopped:
+        raise SafetyViolation(f"중단된 시도가 있어 더 진행하지 않는다: {stopped}")
+    if trial["trial_id"] in finished:
+        raise SafetyViolation(f"이미 수행한 시도다: {trial['trial_id']}")
+    hover = Pose(HOVER, trial["r_index"], trial["j1"], 90)
+    grasp = Pose(GRASP, trial["r_index"], trial["j1"], 90)
+    camera.snapshot(trial["trial_id"])  # 블록이 보드에 있고 팔은 park일 때의 사진
+    arm.goto(PARK_POSE)
+    arm.goto(hover)
+    ledger.start(trial, joints_grasp=arm.gate.joints(grasp), joints_hover=arm.gate.joints(hover))
+    try:
+        _wait_dabai_signal(signal, "descend", wait_s, sleep, clock, log)
+    except NeedHuman:
+        arm.goto(PARK_POSE)
+        ledger.finish(trial["trial_id"], outcome="interrupted", success=False, reason="하강 전 확인을 받지 못했다")
+        raise
+    arm.goto(grasp)
+    arm.set_grip("close")
+    arm.goto(hover)
+    arm.goto(PARK_POSE)
+    arm.sleep(hold_s)
+    read_at_park = arm.read()
+    outcome = observer(trial)
+    values = read_at_park.get("values")
+    grip = values[5] if values and len(values) > 5 else None
+    holds = grip is not None and grip <= P1_GRIP_READ_MAX
+    success = bool(outcome.success and holds)
+    reason = f"{outcome.reason}, 서보 6 판독 {grip}" + ("" if holds else f" > {P1_GRIP_READ_MAX}(빈 손으로 봄)")
+    arm.goto(hover)
+    arm.goto(grasp)
+    arm.set_grip("open")
+    arm.goto(hover)
+    arm.goto(PARK_POSE)
+    ledger.finish(trial["trial_id"], outcome="success" if success else "failed", success=success, reason=reason, read_at_park=read_at_park, grip_read=grip)
+
+
 GRIP_MAX_WAIT_S = 300.0  # H2-A 실측: 사람이 자를 대고 읽고 손을 빼 답하는 데 약 211초
 
 
@@ -583,12 +651,13 @@ def run_g0d(command: str, arm: SafeArm, config: Config, table: PoseTable, folder
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", *G0D_COMMANDS, "answer"])
+    parser.add_argument("command", choices=["read", "ladder", "observe", "dryrun", "replay", "ready", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", *G0D_COMMANDS, "answer"])
     parser.add_argument("--spread", type=Path)
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--r-index", type=int)
     parser.add_argument("--max-sdk", type=int, default=GRIP_SWEEP_MAX_SDK, help="grip-max: 올릴 최대 SDK(close_sdk 초과, 180 이하)")
-    parser.add_argument("--j1", type=int, help="dabai-view: hover·grasp의 J1(기본 90, 범위는 구성 j1_range)")
+    parser.add_argument("--j1", type=int, help="dabai-view·p1-pick: hover·grasp의 J1(dabai-view 기본 90, 범위는 구성 j1_range)")
+    parser.add_argument("--trial", help="p1-pick: 시도 id(예: p1-03)")
     parser.add_argument("--hover-only", action="store_true", help="dabai-view: hover에서 신호 뒤 grasp 없이 park로 돌아온다")
     parser.add_argument("--sheet", type=Path)
     parser.add_argument("--mode", choices=["stored", "label"], default="stored")
@@ -603,8 +672,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.hover_only and args.command != "dabai-view":
         raise SystemExit("--hover-only는 dabai-view에서만 쓴다")
-    if args.j1 is not None and args.command != "dabai-view":
-        raise SystemExit("--j1은 dabai-view에서만 쓴다")
+    if args.j1 is not None and args.command not in ("dabai-view", "p1-pick"):
+        raise SystemExit("--j1은 dabai-view와 p1-pick에서만 쓴다")
     if args.command == "answer":
         # 실행 중인 세션 옆 터미널에서 쓴다. 잠금과 드라이버를 잡지 않는다.
         print(answer_once(args.session.parent))
@@ -631,17 +700,19 @@ def main() -> None:
         (folder / "block_ready").write_text("1")
         print("물체 적재 확인을 기록했다")
         return
+    if args.command == "p1-pick" and (args.r_index is None or args.j1 is None or args.trial is None):
+        raise SystemExit("p1-pick은 --r-index, --j1, --trial이 필요하다")
     if args.command == "grip-max":
         if args.z_offset != 15 or args.r_index is None:
             raise SystemExit("grip-max는 --z-offset 15와 --r-index가 필요하다")
     if args.r_index is not None:
-        if args.command not in ("close-check", "dabai-view", "grip-max"):
-            raise SystemExit("--r-index는 close-check, dabai-view, grip-max에서만 쓴다")
+        if args.command not in ("close-check", "dabai-view", "grip-max", "p1-pick"):
+            raise SystemExit("--r-index는 close-check, dabai-view, grip-max, p1-pick에서만 쓴다")
         if args.command in ("close-check", "grip-max"):
             require_site_folder(folder, args.r_index)
     if args.command == "carry-test" and args.attempt is None:
         raise SystemExit("--attempt가 필요하다")
-    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", *G0D_COMMANDS) and not args.start_confirmed:
+    if args.command in ("ladder", "dryrun", "replay", "descend", "park", "fit", "grip-test", "carry-test", "close-check", "dabai-view", "grip-max", "p1-pick", *G0D_COMMANDS) and not args.start_confirmed:
         raise SystemExit("--start-confirmed 없이는 움직이지 않는다")
     if args.command in ("ladder", "close-check", "grip-max"):
         require_previous_observation(folder, args.z_offset)
@@ -673,6 +744,13 @@ def main() -> None:
             descend_and_stop(arm, config, table)
         elif args.command == "dabai-view":
             run_dabai_view(arm, folder / "dabai_next", r_index=args.r_index if args.r_index is not None else DABAI_VIEW_R_INDEX, hover_only=args.hover_only, j1=args.j1 if args.j1 is not None else 90)
+        elif args.command == "p1-pick":
+            camera = P620Camera(f"runs/{approval.session_id}/frames")
+            try:
+                run_p1(arm, camera, make_pick_observer(camera), AttemptLedger(folder / "p1.jsonl"), config, table,
+                       {"trial_id": args.trial, "r_index": args.r_index, "j1": args.j1, "j5": 90}, folder / "dabai_next", min(args.hold_sec or 5.0, 60.0))
+            finally:
+                camera.close()
         elif args.command == "grip-max":
             run_grip_max(arm, config, folder / "dabai_next", folder / "grip_stop", folder, args.r_index, args.max_sdk)
         elif args.command == "park":
